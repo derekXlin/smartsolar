@@ -260,7 +260,8 @@ async def test_power_is_clamped_to_the_inverter_limit():
 async def test_existing_schedule_is_saved_and_restored():
     """scheduler/enable replaces the WHOLE group list, so without this the owner's
     own schedule would be silently destroyed."""
-    baseline = [{"enable": 1, "startHour": 2, "workMode": "ForceCharge"}]
+    baseline = [{"enable": 1, "startHour": 2, "startMinute": 0,
+                "endHour": 4, "endMinute": 59, "workMode": "ForceCharge"}]
     client = FakeFoxESS(responses={"/op/v0/device/scheduler/get": {"groups": baseline}})
     ctl = build_controller(client)
     from zerohero_dynamic_control.models import BatteryMode
@@ -286,7 +287,8 @@ async def test_disables_scheduler_when_no_baseline_could_be_read():
 async def test_self_consumption_restores_rather_than_writing_a_group():
     """Returning to normal means handing the inverter back, not pinning it to
     a SelfUse group that would outlive our window."""
-    baseline = [{"enable": 1, "startHour": 2, "workMode": "ForceCharge"}]
+    baseline = [{"enable": 1, "startHour": 2, "startMinute": 0,
+                "endHour": 4, "endMinute": 59, "workMode": "ForceCharge"}]
     client = FakeFoxESS(responses={"/op/v0/device/scheduler/get": {"groups": baseline}})
     ctl = build_controller(client)
     from zerohero_dynamic_control.models import BatteryMode
@@ -654,3 +656,126 @@ def test_compose_files_pass_every_secret_the_example_config_needs():
         text = path.read_text()
         for var in required:
             assert var in text, f"{name} never supplies {var}, which config.example.yaml needs"
+
+
+# ------------------------------------------- FoxESS rejects overlapping groups
+ALL_DAY_DEFAULT = {"enable": 1, "startHour": 0, "startMinute": 0,
+                   "endHour": 23, "endMinute": 59, "workMode": "SelfUse"}
+
+
+@pytest.mark.asyncio
+async def test_all_day_default_group_is_never_written_back():
+    """The API reports a 00:00-23:59 SelfUse group that does NOT appear in the
+    FoxESS app — an implicit default, not something the owner set. Writing it
+    back alongside our window is rejected with errno 42023 'Time overlap', which
+    is exactly what stopped the controller taking over on its first live evening.
+    """
+    from zerohero_dynamic_control.models import BatteryMode
+
+    client = FakeFoxESS(responses={
+        "/op/v1/device/scheduler/get": {"groups": [FREE_CHARGE_GROUP, ALL_DAY_DEFAULT]},
+        "/op/v0/device/scheduler/get": {"groups": [FREE_CHARGE_GROUP, ALL_DAY_DEFAULT]},
+    })
+    ctl = build_controller(client)
+    await ctl.set_mode(BatteryMode.FORCE_EXPORT, now=datetime(2026, 9, 27, 18, 0, tzinfo=TZ))
+
+    groups = [c for c in client.calls if c[0].endswith("/enable")][-1][1]["groups"]
+    assert ALL_DAY_DEFAULT not in groups, "the all-day default must not be written back"
+    assert FREE_CHARGE_GROUP in groups, "the owner's real group must survive"
+    assert any(g["workMode"] == "ForceDischarge" for g in groups)
+
+
+@pytest.mark.asyncio
+async def test_no_two_written_groups_share_a_minute():
+    """FoxESS validates that groups never overlap, so whatever we send must be
+    disjoint or the whole write is refused and the controller does nothing."""
+    from zerohero_dynamic_control.models import BatteryMode
+
+    client = FakeFoxESS(responses={
+        "/op/v1/device/scheduler/get": {"groups": [FREE_CHARGE_GROUP, ALL_DAY_DEFAULT,
+                                                   {"enable": 1, "startHour": 18, "startMinute": 0,
+                                                    "endHour": 19, "endMinute": 5,
+                                                    "workMode": "ForceDischarge"}]},
+    })
+    ctl = build_controller(client)
+    await ctl.set_mode(BatteryMode.FORCE_EXPORT, now=datetime(2026, 9, 27, 18, 0, tzinfo=TZ))
+
+    groups = [c for c in client.calls if c[0].endswith("/enable")][-1][1]["groups"]
+    spans = sorted((g["startHour"] * 60 + g["startMinute"],
+                    g["endHour"] * 60 + g["endMinute"]) for g in groups)
+    for (s1, e1), (s2, _) in zip(spans, spans[1:], strict=False):
+        assert e1 < s2, f"groups overlap: {s1//60}:{s1%60:02d}-{e1//60}:{e1%60:02d} vs {s2//60}:{s2%60:02d}"
+
+
+@pytest.mark.asyncio
+async def test_overlap_error_is_reported_with_the_groups_that_caused_it():
+    from zerohero_dynamic_control.controllers.base import ControllerError
+    from zerohero_dynamic_control.models import BatteryMode
+
+    class Overlapping(FakeFoxESS):
+        async def _send(self, path, body, method):
+            self.calls.append((path, body))
+            if path.endswith("/enable"):
+                return {"errno": 42023, "msg": "Time overlap, please reselect time"}
+            return {"errno": 0, "result": {}}
+
+    ctl = build_controller(Overlapping())
+    with pytest.raises(ControllerError, match="42023"):
+        await ctl.set_mode(BatteryMode.FORCE_EXPORT, now=datetime(2026, 9, 27, 18, 0, tzinfo=TZ))
+
+
+# ---------------------------------------------- surviving a mid-window restart
+@pytest.mark.asyncio
+async def test_baseline_is_persisted_so_a_restart_cannot_lose_it(tmp_path):
+    """Once we have written our group, the inverter no longer holds the owner's.
+    A restart that re-read it would adopt OUR group as the baseline and restore
+    that at 21:00, permanently destroying theirs."""
+    from zerohero_dynamic_control.controllers.foxess import FoxESSController
+    from zerohero_dynamic_control.models import BatteryMode
+
+    owner = {"enable": 1, "startHour": 18, "startMinute": 0, "endHour": 19,
+             "endMinute": 5, "workMode": "ForceDischarge", "fdPwr": 10000,
+             "fdSoc": 10, "minSocOnGrid": 10, "maxSoc": 100}
+    path = tmp_path / "baseline.json"
+    client = FakeFoxESS(responses={"/op/v1/device/scheduler/get":
+                                   {"groups": [FREE_CHARGE_GROUP, owner]}})
+    cfg = AppConfig()
+    ctl = FoxESSController(client, "SN", window_start=cfg.plan.credit_window_start,
+                           window_end=cfg.plan.credit_window_end, min_soc_on_grid_pct=10,
+                           max_power_kw=10.0, baseline_path=path)
+    await ctl.set_mode(BatteryMode.FORCE_EXPORT, now=datetime(2026, 9, 27, 18, 0, tzinfo=TZ))
+    assert path.exists(), "baseline was never persisted"
+
+    # Simulate a restart: the inverter now reports OUR group, not the owner's.
+    ours = [c for c in client.calls if c[0].endswith("/enable")][-1][1]["groups"]
+    client2 = FakeFoxESS(responses={"/op/v1/device/scheduler/get": {"groups": ours}})
+    ctl2 = FoxESSController(client2, "SN", window_start=cfg.plan.credit_window_start,
+                            window_end=cfg.plan.credit_window_end, min_soc_on_grid_pct=10,
+                            max_power_kw=10.0, baseline_path=path)
+    await ctl2.restore(now=datetime(2026, 9, 27, 21, 0, tzinfo=TZ), reason="close")
+    restored = [c for c in client2.calls if c[0].endswith("/enable")][-1][1]["groups"]
+    assert owner in restored, "the owner's original group was not recovered"
+    assert not path.exists(), "the persisted copy should be cleared after a restore"
+
+
+@pytest.mark.asyncio
+async def test_our_own_group_is_never_adopted_as_the_baseline(tmp_path):
+    """Belt and braces for the same failure when no persisted copy exists."""
+    from zerohero_dynamic_control.controllers.foxess import FoxESSController
+    from zerohero_dynamic_control.models import BatteryMode
+
+    cfg = AppConfig()
+    ctl = FoxESSController(FakeFoxESS(), "SN", window_start=cfg.plan.credit_window_start,
+                           window_end=cfg.plan.credit_window_end, min_soc_on_grid_pct=10,
+                           max_power_kw=10.0)
+    ours = ctl._group("ForceDischarge", 2.2, 25)
+    ours["endHour"] = ctl._end_hour()
+    assert ctl._is_ours(ours)
+
+    client = FakeFoxESS(responses={"/op/v1/device/scheduler/get":
+                                   {"groups": [FREE_CHARGE_GROUP, ours]}})
+    ctl2 = FoxESSController(client, "SN", window_start=cfg.plan.credit_window_start,
+                            window_end=cfg.plan.credit_window_end, min_soc_on_grid_pct=10,
+                            max_power_kw=10.0, baseline_path=tmp_path / "b.json")
+    await ctl2.set_mode(BatteryMode.FORCE_EXPORT, now=datetime(2026, 9, 27, 18, 30, tzinfo=TZ))
+    assert ctl2._baseline == [FREE_CHARGE_GROUP]

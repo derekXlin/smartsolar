@@ -244,6 +244,16 @@ class StrategyConfig(BaseModel):
     in summer, near zero in mid-winter. Used by the ECONOMIC objective to work out how
     full the pack will already be when free charging starts."""
 
+    catch_up_on_start: bool = True
+    """If the process starts while the credit window is already open, run it for
+    the remaining time instead of waiting for tomorrow.
+
+    Without this a single failure at 17:50 — a bad API call, a container
+    restart, a NAS reboot — silently forfeits the whole evening, because the
+    cron job does not fire again until the next day. That happened on the first
+    live run: the job raised, and the controller then sat idle through a window
+    it could still have driven."""
+
     abandon_credit_if_unwinnable: bool = True
     """If the pack cannot cover the whole window, the $1 credit is lost no matter what
     (the rule requires every hour to comply). In that case burning the battery down to
@@ -276,6 +286,17 @@ class StrategyConfig(BaseModel):
 class ForecastConfig(BaseModel):
     provider: Literal["static", "open_meteo", "solcast", "simulated"] = "static"
     pv_rating_kw: float = Field(10.0, gt=0)
+    array_tilt_deg: float = Field(20.0, ge=0, le=90)
+    """Roof pitch. 20 degrees suits a typical Australian tiled roof."""
+
+    array_azimuth_deg: float | None = None
+    """Direction the panels face, in Open-Meteo's convention: 0 = SOUTH,
+    -90 = east, 90 = west, ±180 = north. There is NO hemisphere adjustment —
+    0 means south in Sydney just as it does in London.
+
+    Leave null to derive it from latitude: 180 (north-facing) below the equator,
+    0 (south-facing) above. Set explicitly for an east/west split array."""
+
     solcast_api_key: str | None = None
     solcast_resource_id: str | None = None
     timeout_seconds: float = 10.0

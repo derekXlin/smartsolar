@@ -166,6 +166,13 @@ forecast:
   # yearly figure in that same export contradicts itself (3.22 MWh header vs
   # all-zero daily rows), so correct this from your inverter nameplate.
   pv_rating_kw: 6.6
+
+  # Panel geometry, in Open-Meteo's convention: 0 = SOUTH, -90 = east,
+  # 90 = west, +/-180 = north. There is NO hemisphere adjustment, so a
+  # north-facing array in Australia is 180, not 0.
+  # Leave array_azimuth_deg unset to derive it from latitude.
+  array_tilt_deg: 20
+  # array_azimuth_deg: 180
   # solcast_api_key: ${SOLCAST_API_KEY}
   # solcast_resource_id: your-resource-id
   timeout_seconds: 10.0

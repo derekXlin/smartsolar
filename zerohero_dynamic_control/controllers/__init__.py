@@ -51,6 +51,7 @@ def build_controller(cfg: AppConfig) -> BatteryController:
             fd_soc_pct=int(cfg.battery.min_reserve_soc_pct),
             max_power_kw=cfg.inverter.ac_limit_kw,
             preserve_baseline=fox.preserve_existing_schedule,
+            baseline_path=cfg.logging.ledger_path.parent / "foxess_baseline.json",
         )
     elif kind == "tesla_fleet":
         from .tesla_fleet import TeslaFleetController

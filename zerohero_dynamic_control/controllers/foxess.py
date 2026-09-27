@@ -41,8 +41,10 @@ reports a 2-second minimum interval to match the documented update limit.
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, time
+from datetime import date, datetime, time
+from pathlib import Path
 from typing import Any
 
 from ..foxess_client import FoxESSClient, FoxESSError, FoxESSQuotaExhausted
@@ -81,6 +83,7 @@ class FoxESSController(BatteryController):
         max_power_kw: float,
         fd_soc_pct: int | None = None,
         preserve_baseline: bool = True,
+        baseline_path: Path | None = None,
     ) -> None:
         super().__init__()
         self.client = client
@@ -99,9 +102,15 @@ class FoxESSController(BatteryController):
         self.fd_soc_pct = int(fd_soc_pct if fd_soc_pct is not None else min_soc_on_grid_pct)
         self.max_power_kw = max_power_kw
         self.preserve_baseline = preserve_baseline
+        # Persist the owner's schedule to disk the moment we first read it.
+        # Once we have written our own group, the inverter no longer remembers
+        # what was there before, so a restart mid-window would adopt OUR group
+        # as the baseline and restore it at 21:00 — permanently losing theirs.
+        self.baseline_path = baseline_path
 
         self._baseline: list[dict[str, Any]] | None = None
         self.max_groups = MAX_SCHEDULER_GROUPS
+        self.max_soc_pct = 100
         self._baseline_loaded = False
         self._mode: BatteryMode = BatteryMode.SELF_CONSUMPTION
         self._power_kw: float = 0.0
@@ -116,18 +125,72 @@ class FoxESSController(BatteryController):
         )
 
     # ------------------------------------------------------------- baseline
+    def _is_ours(self, group: dict[str, Any]) -> bool:
+        """A group we wrote on an earlier run, not the owner's."""
+        return (
+            group.get("workMode") == "ForceDischarge"
+            and self._minutes(group, "start", 0) == self.window_start.hour * 60 + self.window_start.minute
+            and self._minutes(group, "end", 23) == self._end_hour() * 60 + self._group_end_minute()
+        )
+
+    def _read_persisted_baseline(self) -> list[dict[str, Any]] | None:
+        if self.baseline_path is None or not self.baseline_path.exists():
+            return None
+        try:
+            saved = json.loads(self.baseline_path.read_text())
+            if saved.get("date") != date.today().isoformat():
+                return None
+            log.info("recovered the owner's schedule from %s (%d groups) — the "
+                     "inverter no longer holds it", self.baseline_path, len(saved["groups"]))
+            return saved["groups"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read the persisted baseline: %s", exc)
+            return None
+
+    def _persist_baseline(self, groups: list[dict[str, Any]]) -> None:
+        if self.baseline_path is None:
+            return
+        try:
+            self.baseline_path.parent.mkdir(parents=True, exist_ok=True)
+            self.baseline_path.write_text(json.dumps(
+                {"date": date.today().isoformat(), "groups": groups}, indent=2))
+        except OSError as exc:
+            log.error("could not persist the owner's schedule (%s); a restart "
+                      "before close-out would lose it", exc)
+
     async def _load_baseline(self) -> None:
         if self._baseline_loaded or not self.preserve_baseline:
+            self._baseline_loaded = True
+            return
+        recovered = self._read_persisted_baseline()
+        if recovered is not None:
+            self._baseline = recovered
             self._baseline_loaded = True
             return
         try:
             current = await self.client.scheduler_get(self.sn)
             # The inverter pads the list with blank disabled placeholders; keep
             # only groups that actually do something so our insert stays readable.
-            self._baseline = [
+            real = [
                 g for g in (current.get("groups") or [])
                 if g.get("workMode") and int(g.get("enable", 1) or 0)
             ]
+            # Drop the all-day catch-all. The API reports a 00:00-23:59 SelfUse
+            # group that does NOT appear in the FoxESS app, so it is an implicit
+            # default rather than something the owner configured. Writing it back
+            # alongside any other group is rejected with errno 42023 "Time
+            # overlap" — which is what stopped the controller taking over on its
+            # first live evening.
+            # Exclude our own group from a previous run in this window, else we
+            # would "restore" it over the top of the owner's real schedule.
+            self._baseline = [
+                g for g in real if not self._is_catch_all(g) and not self._is_ours(g)
+            ]
+            self._persist_baseline(self._baseline)
+            dropped = len(real) - len(self._baseline)
+            if dropped:
+                log.info("ignoring %d all-day default group(s); FoxESS rejects "
+                         "writes that overlap them", dropped)
             self.max_groups = max(MAX_SCHEDULER_GROUPS, int(current.get("maxGroupCount") or 0))
             log.info("saved the existing FoxESS schedule (%d groups) for restore at close-out",
                      len(self._baseline))
@@ -195,12 +258,6 @@ class FoxESSController(BatteryController):
                 merged[i] = ours
                 return self._cap(merged, ours)
 
-        for i, g in enumerate(baseline):
-            if self._is_catch_all(g):
-                log.info("inserting our window ahead of the all-day %s catch-all",
-                         g.get("workMode"))
-                return self._cap([*baseline[:i], ours, *baseline[i:]], ours)
-
         return self._cap([*baseline, ours], ours)
 
     def _cap(self, groups: list[dict[str, Any]], ours: dict[str, Any]) -> list[dict[str, Any]]:
@@ -231,9 +288,15 @@ class FoxESSController(BatteryController):
             "endHour": self.window_end.hour,
             # The window is exclusive of its end instant; FoxESS groups are inclusive
             # of the end minute, so stop one minute short to avoid overrunning 21:00.
-            "endMinute": max(0, self.window_end.minute - 1) if self.window_end.minute else 59,
+            "endMinute": self._group_end_minute(),
             "workMode": work_mode,
             "minSocOnGrid": self.min_soc_on_grid_pct,
+            # maxSoc is not optional. Every group the inverter itself returns
+            # carries it, and omitting it is rejected with errno 40257
+            # "Parameters do not meet expectations" — an error that names
+            # nothing, so the only way to find it is to diff our payload against
+            # a group the device wrote itself.
+            "maxSoc": int(self.max_soc_pct),
             "fdSoc": int(fd_soc),
             # fdPwr is an integer number of WATTS.
             "fdPwr": int(round(max(0.0, min(self.max_power_kw, abs(power_kw))) * 1000)),
@@ -261,6 +324,9 @@ class FoxESSController(BatteryController):
                 f"releases the battery without us"
             )
 
+    def _group_end_minute(self) -> int:
+        return max(0, self.window_end.minute - 1) if self.window_end.minute else 59
+
     def _end_hour(self) -> int:
         return self.window_end.hour if self.window_end.minute else max(0, self.window_end.hour - 1)
 
@@ -270,14 +336,23 @@ class FoxESSController(BatteryController):
         group = self._group(work_mode, power_kw, self.fd_soc_pct)
         group["endHour"] = self._end_hour()
         self._assert_bounded(group)
+        groups = self._merged_groups(group)
         try:
-            await self.client.scheduler_enable(self.sn, self._merged_groups(group), critical=critical)
+            await self.client.scheduler_enable(self.sn, groups, critical=critical)
         except FoxESSQuotaExhausted as exc:
             # Do not raise: a skipped setpoint nudge is far better than aborting the
             # window. The existing group stays in force and the loop retries later.
             log.warning("skipping FoxESS write, daily budget guard: %s", exc)
             return
         except FoxESSError as exc:
+            if "42023" in str(exc):
+                raise ControllerError(
+                    f"FoxESS rejected the schedule as overlapping (errno 42023). "
+                    f"Groups written: "
+                    f"{[(g['startHour'], g['endHour'], g['workMode']) for g in groups]}. "
+                    f"FoxESS allows no two groups to share any minute, including "
+                    f"its own all-day default."
+                ) from exc
             raise ControllerError(f"FoxESS scheduler write failed: {exc}") from exc
         self._mode, self._power_kw = mode, power_kw
 
@@ -306,10 +381,17 @@ class FoxESSController(BatteryController):
 
     async def restore(self, *, now: datetime, reason: str = "") -> None:
         """Put the inverter back the way we found it. Always allowed to spend budget."""
+        # Load the baseline first. After a mid-window restart, close-out can be
+        # the FIRST thing this controller does, so nothing has populated it yet —
+        # and an empty baseline means we disable the scheduler instead of
+        # restoring, wiping the owner's groups for the sake of tidying up.
+        await self._load_baseline()
         try:
             if self._baseline:
                 await self.client.scheduler_enable(self.sn, self._baseline, critical=True)
                 log.info("restored the owner's original FoxESS schedule (%s)", reason)
+                if self.baseline_path is not None and self.baseline_path.exists():
+                    self.baseline_path.unlink()
             else:
                 await self.client.scheduler_disable(self.sn, critical=True)
                 log.info("disabled the FoxESS scheduler, returning to SelfUse (%s)", reason)

@@ -38,6 +38,20 @@ class OpenMeteoForecastProvider(ForecastProvider):
             self._client = httpx.AsyncClient(timeout=self.cfg.forecast.timeout_seconds)
         return self._client
 
+    def _azimuth(self) -> float:
+        """Panel direction in Open-Meteo's convention.
+
+        Their docs: "0 south, -90 east, 90 west, +/-180 north" — and there is NO
+        automatic hemisphere adjustment. Passing 0 from Sydney therefore models a
+        SOUTH-facing array, which points away from the sun and under-forecasts
+        badly. Below the equator the sun tracks through the north, so a
+        north-facing array is 180.
+        """
+        configured = self.cfg.forecast.array_azimuth_deg
+        if configured is not None:
+            return configured
+        return 180.0 if self.cfg.site.latitude < 0 else 0.0
+
     async def solar(self, start: datetime, end: datetime) -> list[ForecastPoint]:
         try:
             client = await self._get_client()
@@ -49,9 +63,8 @@ class OpenMeteoForecastProvider(ForecastProvider):
                     "minutely_15": "global_tilted_irradiance",
                     "timezone": self.cfg.site.timezone,
                     "forecast_days": 2,
-                    "tilt": 20,
-                    "azimuth": 0,  # Open-Meteo: 0 = due south in the N hemisphere,
-                                   # but it flips to due north below the equator.
+                    "tilt": self.cfg.forecast.array_tilt_deg,
+                    "azimuth": self._azimuth(),
                 },
             )
             resp.raise_for_status()

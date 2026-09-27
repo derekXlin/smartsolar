@@ -288,3 +288,28 @@ async def test_forecast_only_failure_is_not_labelled_as_telemetry_loss():
     assert not decision.telemetry_assumed
     assert decision.degraded
     assert any("forecast unavailable" in r for r in decision.rationale)
+
+
+# ----------------------------------------------------- solar array orientation
+def test_open_meteo_azimuth_faces_the_sun_in_each_hemisphere():
+    """Open-Meteo's azimuth is 0 = SOUTH with no hemisphere adjustment, so a
+    hard-coded 0 models a south-facing array in Sydney — pointing away from the
+    sun and under-forecasting badly. Below the equator north is 180."""
+    from zerohero_dynamic_control.data_providers.open_meteo import OpenMeteoForecastProvider
+
+    cfg = AppConfig()
+    cfg.site.latitude = -33.7                      # Sydney
+    assert OpenMeteoForecastProvider(cfg)._azimuth() == 180.0
+
+    cfg.site.latitude = 51.5                       # London
+    assert OpenMeteoForecastProvider(cfg)._azimuth() == 0.0
+
+
+def test_explicit_azimuth_overrides_the_hemisphere_default():
+    """An east/west split array is not simply 'equator-facing'."""
+    from zerohero_dynamic_control.data_providers.open_meteo import OpenMeteoForecastProvider
+
+    cfg = AppConfig()
+    cfg.site.latitude = -33.7
+    cfg.forecast.array_azimuth_deg = -90.0         # east-facing
+    assert OpenMeteoForecastProvider(cfg)._azimuth() == -90.0

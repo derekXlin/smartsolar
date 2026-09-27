@@ -19,6 +19,7 @@ from .config import AppConfig
 from .controllers import build_controller
 from .data_providers import CachingTelemetryProvider, build_forecast_provider
 from .data_providers.base import TelemetryProvider
+from .decision_engine import DecisionEngine
 from .free_window import FreeChargeAssurance
 from .ledger import Ledger
 from .runtime import EveningRunner, FreeChargeRunner
@@ -65,7 +66,18 @@ class ZeroHeroScheduler:
                 log.error("controller health check failed — running in degraded mode")
                 runner.degraded = True
             await runner.make_decision()
-            outcome = await runner.run_window()
+            # Retry the first command. The very first live evening died because
+            # one rejected API call raised straight out of the job, and nothing
+            # retried it for the remaining three hours of the window.
+            for attempt in range(1, 4):
+                try:
+                    outcome = await runner.run_window()
+                    break
+                except Exception:
+                    if attempt == 3:
+                        raise
+                    log.exception("control loop failed (attempt %d/3); retrying in 30 s", attempt)
+                    await asyncio.sleep(30)
             log.info("evening complete: credit_secured=%s exported=%.2f kWh",
                      outcome.credit_secured, outcome.exported_kwh)
         except Exception:
@@ -163,6 +175,15 @@ class ZeroHeroScheduler:
 
         self._stop = asyncio.Event()
         sched.start()
+
+        if self.cfg.strategy.catch_up_on_start:
+            now = self.clock.now()
+            start, end = DecisionEngine(self.cfg).window_bounds(now)
+            if start <= now < end:
+                mins = int((end - now).total_seconds() // 60)
+                log.warning("started inside the credit window with %d min left — "
+                            "catching up rather than forfeiting the evening", mins)
+                asyncio.create_task(self.evening_job())
         self._install_signal_handlers()
         log.info("zerohero %s (build %s) — local time %s (%s)",
                  __version__, os.environ.get("ZEROHERO_BUILD", "unknown"),

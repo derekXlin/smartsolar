@@ -282,11 +282,23 @@ class FoxESSClient:
         return {}
 
     async def scheduler_enable(self, sn: str, groups: list[dict[str, Any]], *, critical: bool = False) -> None:
-        await self.request(
-            "/op/v0/device/scheduler/enable",
-            {"deviceSN": sn, "groups": groups},
-            critical=critical,
-        )
+        """Write the schedule, preferring the API version this firmware answers.
+
+        /op/v0/device/scheduler/get returns an empty list on the H3-10.0-Smart
+        while /op/v1 returns the real groups, so v0 is clearly not the version
+        this firmware speaks. Try v1 first and keep v0 as the fallback for older
+        units, rather than assuming either.
+        """
+        last: FoxESSError | None = None
+        for path in ("/op/v1/device/scheduler/enable", "/op/v0/device/scheduler/enable"):
+            try:
+                await self.request(path, {"deviceSN": sn, "groups": groups}, critical=critical)
+                return
+            except FoxESSError as exc:
+                log.debug("%s rejected the write: %s", path, exc)
+                last = exc
+        assert last is not None
+        raise last
 
     async def scheduler_disable(self, sn: str, *, critical: bool = True) -> None:
         await self.request("/op/v0/device/scheduler/set/flag", {"deviceSN": sn, "enable": 0}, critical=critical)
