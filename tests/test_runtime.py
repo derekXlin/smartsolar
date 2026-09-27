@@ -90,6 +90,22 @@ async def test_stale_telemetry_falls_back_to_fixed_power():
     assert "FALLBACK" in reason
 
 
+def test_stale_telemetry_never_lowers_the_setpoint():
+    """Seen live at 18:55: a stale sample cut 4.75 kW to the 3.0 kW fallback while
+    the house was still drawing 4 kW. No new information is no reason to back off."""
+    cfg = AppConfig()
+    now = datetime(2026, 9, 27, 18, 55, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(), BoomForecast(), now)
+    runner.last_setpoint_kw = 4.75
+    stale = Telemetry(
+        timestamp=now, soc_pct=55.0, battery_energy_kwh=soc_to_energy(55.0, 47.0),
+        solar_kw=0.0, load_kw=4.0, battery_kw=2.1, grid_kw=1.9, stale=True,
+    )
+    setpoint, reason = runner.compute_setpoint(stale, now)
+    assert setpoint == pytest.approx(4.75)
+    assert "FALLBACK" in reason
+
+
 @pytest.mark.asyncio
 async def test_caching_provider_serves_last_good_reading():
     inner = BoomTelemetry(fail_after=1)
@@ -235,6 +251,24 @@ async def test_plausible_charging_is_not_rejected():
 
 
 @pytest.mark.asyncio
+async def test_one_point_soc_tick_is_not_rejected():
+    """FoxESS reports whole points, so 56% -> 55% a minute apart is an ordinary
+    tick, not a 1 point/min discharge. Rejecting it 19 times on the first live
+    evening discarded the fresh snapshot each time, including the one at 18:50
+    that showed a 4 kW load spike."""
+    rate = 10.0 / 47.0 * 100.0 / 60.0
+    cache = CachingTelemetryProvider(DriftingSite([56.0, 55.0, 54.0]),
+                                     max_soc_rate_pct_per_min=rate)
+    t0 = datetime(2026, 9, 27, 18, 49, tzinfo=TZ)
+    await cache.read(t0)
+    r1 = await cache.read(t0 + timedelta(minutes=1))
+    assert r1.soc_pct == 55.0 and not r1.stale
+    r2 = await cache.read(t0 + timedelta(minutes=2))
+    assert r2.soc_pct == 54.0 and not r2.stale
+    assert cache.rejected_samples == 0
+
+
+@pytest.mark.asyncio
 async def test_persistent_disagreement_eventually_wins():
     """If the 'impossible' value keeps coming back, our baseline is the wrong one.
     Refusing forever would leave the controller steering on a fossil."""
@@ -313,3 +347,58 @@ def test_explicit_azimuth_overrides_the_hemisphere_default():
     cfg.site.latitude = -33.7
     cfg.forecast.array_azimuth_deg = -90.0         # east-facing
     assert OpenMeteoForecastProvider(cfg)._azimuth() == -90.0
+
+
+# ------------------------------------------------------- restarts mid-window
+def _ledger(tmp_path):
+    from zerohero_dynamic_control.ledger import Ledger
+
+    return Ledger(tmp_path / "ledger.jsonl", tmp_path / "decisions.jsonl", tmp_path / "samples.jsonl")
+
+
+def _sample(ledger, when, grid_kw):
+    ledger.record_sample(
+        Telemetry(timestamp=when, soc_pct=55.0, battery_energy_kwh=soc_to_energy(55.0, 47.0),
+                  load_kw=2.0, grid_kw=grid_kw),
+        setpoint_kw=2.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_restart_mid_window_remembers_an_earlier_breach(tmp_path):
+    """A fresh monitor after a restart used to forget the hour it had already lost,
+    and would have reported the day clean. The samples log remembers."""
+    cfg = AppConfig()
+    ledger = _ledger(tmp_path)
+    start = datetime(2026, 9, 27, 18, 0, tzinfo=TZ)
+    for m in range(0, 30):
+        _sample(ledger, start + timedelta(minutes=m), 1.9 if 10 <= m < 15 else -0.3)
+    now = start + timedelta(minutes=31)
+    runner = build_runner(cfg, BoomTelemetry(fail_after=99), BoomForecast(), now)
+    runner.ledger = ledger
+
+    await runner.make_decision()
+    assert runner.monitor is not None
+    assert [b.hour_start.hour for b in runner.monitor.breached_hours()] == [18]
+    assert runner.exported_kwh > 0
+
+
+@pytest.mark.asyncio
+async def test_partial_close_out_does_not_claim_the_credit(tmp_path):
+    """The shutdown path closes the window early. It must not write a pass for
+    hours it never reached, and a later full row must supersede it."""
+    from zerohero_dynamic_control.ledger import verdict_of
+
+    cfg = AppConfig()
+    ledger = _ledger(tmp_path)
+    now = datetime(2026, 9, 27, 18, 5, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(fail_after=99), BoomForecast(), now)
+    runner.ledger = ledger
+    await runner.make_decision()
+    early = await runner.close_out()
+    assert early.partial and not early.credit_secured
+    assert verdict_of(early) == "UNVERIFIED"
+
+    ledger.record_outcome(early.model_copy(update={"partial": False, "exported_kwh": 1.0}))
+    rows = ledger.read_outcomes()
+    assert len(rows) == 1 and rows[0].exported_kwh == 1.0

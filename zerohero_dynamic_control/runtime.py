@@ -162,11 +162,49 @@ class EveningRunner:
             decision.window_start, decision.window_end, self.cfg.plan.import_limit_kwh_per_hour
         )
         if self.ledger:
+            self._replay_window_so_far(now)
             self.ledger.record_decision(decision)
         log.info("decision: %s | %s", decision.summary(), decision.pnl_summary)
         for line in decision.rationale:
             log.info("  reason: %s", line)
         return decision
+
+    def _replay_window_so_far(self, now: datetime) -> None:
+        """After a mid-window restart, rebuild import and export from the samples log.
+
+        A fresh monitor forgets everything before the restart, so an hour already
+        breached would read clean again and the day's export would restart at zero.
+        Every tick is already in samples.jsonl; replaying the in-window ones restores
+        both, and a restart gap longer than the sample-gap limit stays visible as
+        unwatched time rather than being papered over.
+        """
+        assert self.decision is not None and self.monitor is not None and self.ledger is not None
+        start = self.decision.window_start
+        if now <= start:
+            return
+        samples = self.ledger.read_samples(start, now)
+        for when, grid_kw in samples:
+            self._account(when, grid_kw)
+        if samples:
+            log.warning("resumed mid-window: replayed %d samples from %s to %s | %s",
+                        len(samples), samples[0][0].strftime("%H:%M"),
+                        samples[-1][0].strftime("%H:%M"), self.monitor.report())
+
+    def _account(self, when: datetime, grid_kw: float) -> None:
+        """Feed one sample into the credit monitor and the export total."""
+        if self.monitor:
+            self.monitor.observe(when, grid_kw)
+        export_kw = max(0.0, -grid_kw)
+        if grid_kw < 0:
+            # Accumulate exported energy between samples.
+            prev = getattr(self, "_last_export_sample", None)
+            if prev is not None:
+                dt_h = (when - prev[0]).total_seconds() / 3600.0
+                if 0 < dt_h < 1:
+                    self.exported_kwh += (prev[1] + export_kw) / 2 * dt_h
+            self._last_export_sample = (when, export_kw)
+        else:
+            self._last_export_sample = (when, 0.0)
 
     async def _morning_solar_estimate(self, window_end: datetime) -> float | None:
         """How much PV will reach the battery between sunrise and the free window.
@@ -275,7 +313,16 @@ class EveningRunner:
             # Flying blind: fall back to the simple, documented behaviour — force
             # export at a fixed rate until 21:00. It will not be optimal, but it is
             # predictable and it keeps the battery pushing against the house load.
-            return self.cfg.strategy.fallback_discharge_kw, "FALLBACK: telemetry stale"
+            # Never BELOW what we were already commanding, though: the last
+            # setpoint answered the last load we saw, and dropping it on no new
+            # information is how 18:55 on the first live evening cut 4.75 kW to
+            # 3.0 kW while the house was still drawing 4 kW.
+            fallback = self.cfg.strategy.fallback_discharge_kw
+            if self.last_setpoint_kw > fallback:
+                return self.last_setpoint_kw, (
+                    f"FALLBACK: telemetry stale, holding {self.last_setpoint_kw:.2f} kW"
+                )
+            return fallback, "FALLBACK: telemetry stale"
 
         slot = self._slot_for(now)
         planned_export_kw = slot.export_discharge_kw if slot else 0.0
@@ -319,18 +366,7 @@ class EveningRunner:
         self.last_telemetry = tel
         if isinstance(self.controller, SafetyWrapper):
             self.controller.observe_soc(tel.soc_pct)
-        if self.monitor:
-            self.monitor.observe(now, tel.grid_kw)
-        if tel.grid_kw < 0:
-            # Accumulate exported energy between samples.
-            prev = getattr(self, "_last_export_sample", None)
-            if prev is not None:
-                dt_h = (now - prev[0]).total_seconds() / 3600.0
-                if 0 < dt_h < 1:
-                    self.exported_kwh += (prev[1] + tel.export_kw) / 2 * dt_h
-            self._last_export_sample = (now, tel.export_kw)
-        else:
-            self._last_export_sample = (now, 0.0)
+        self._account(now, tel.grid_kw)
 
         setpoint, reason = self.compute_setpoint(tel, now)
         mode = (
@@ -419,6 +455,16 @@ class EveningRunner:
         tel = self.last_telemetry
         monitor = self.monitor
         secured = monitor.credit_secured if monitor else False
+        verified = monitor.credit_verified if monitor else False
+        partial = self.decision is not None and now < self.decision.window_end
+
+        notes = [monitor.report()] if monitor else []
+        if partial:
+            notes.append(f"PARTIAL: closed out at {now:%H:%M}, before the window ended — "
+                         f"a later row for this date supersedes this one")
+        if monitor and monitor.breach_free and not verified:
+            notes.append("UNVERIFIED: no breach seen, but not every hour was watched, "
+                         "so the credit cannot be claimed")
 
         pnl = project_daily_pnl(
             self.cfg.plan.tariff,
@@ -436,9 +482,11 @@ class EveningRunner:
             final_soc_pct=round(tel.soc_pct, 2) if tel else 0.0,
             final_energy_kwh=round(tel.battery_energy_kwh, 2) if tel else 0.0,
             credit_secured=secured,
+            credit_verified=verified,
+            partial=partial,
             super_export_kwh=round(min(self.exported_kwh, self.cfg.plan.super_export_cap_kwh), 3),
             estimated_revenue_aud=round(pnl.net_aud, 3),
-            notes=[monitor.report()] if monitor else [],
+            notes=notes,
         )
         if self.ledger:
             self.ledger.record_outcome(outcome)

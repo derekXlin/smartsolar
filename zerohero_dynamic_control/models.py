@@ -229,6 +229,11 @@ class HourImport(BaseModel):
     hour_start: datetime
     imported_kwh: float = 0.0
     limit_kwh: float = 0.03
+    observed_minutes: float = 0.0
+    """How much of this hour telemetry actually covered. Zero import over an hour
+    nobody watched is not evidence of anything."""
+    span_minutes: float = 60.0
+    """The part of this clock hour that falls inside the credit window."""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -242,6 +247,16 @@ class HourImport(BaseModel):
         # the limit is treated as a breach rather than a pass.
         return self.imported_kwh >= self.limit_kwh - 1e-9
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verified(self) -> bool:
+        """Watched closely enough that a clean result means something.
+
+        90% leaves room for a restart or a dropped poll, but not for the 17
+        unwatched minutes that preceded takeover on the first live evening.
+        """
+        return self.observed_minutes >= 0.9 * self.span_minutes
+
 
 class DailyOutcome(BaseModel):
     """One row of the ledger — written after every credit window closes."""
@@ -254,6 +269,13 @@ class DailyOutcome(BaseModel):
     final_soc_pct: float = 0.0
     final_energy_kwh: float = 0.0
     credit_secured: bool = False
+    """True only when every hour was both under the limit AND watched."""
+    credit_verified: bool = False
+    """Every hour of the window was covered by telemetry. False with no breach
+    means the result is unknown, not that the credit was missed."""
+    partial: bool = False
+    """Closed out before the window ended (shutdown, crash). A later row for the
+    same date supersedes it."""
     super_export_kwh: float = 0.0
     estimated_revenue_aud: float = 0.0
     notes: list[str] = Field(default_factory=list)

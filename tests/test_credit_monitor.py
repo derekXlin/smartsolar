@@ -83,3 +83,43 @@ def test_absurd_time_gaps_are_ignored_not_integrated():
     m.observe(START, 3.0)
     m.observe(START + timedelta(hours=2), 3.0)
     assert m.total_import_kwh == pytest.approx(0.0)
+
+
+def test_an_unwatched_window_is_not_secured():
+    """Seen live: a restart closed out a window it never sampled, and the monitor's
+    pre-built empty buckets reported a clean pass. No samples is no evidence."""
+    m = CreditMonitor(START, END)
+    assert m.breach_free
+    assert not m.credit_verified
+    assert not m.credit_secured
+    assert "UNVERIFIED" in m.report()
+
+
+def test_late_takeover_leaves_the_first_hour_unverified():
+    """Taking over at 18:17 leaves 17 minutes of 18:00 unwatched — enough for a
+    kettle to have lost the hour without us knowing."""
+    m = CreditMonitor(START, END)
+    t = START + timedelta(minutes=17)
+    while t < END:
+        m.observe(t, -1.0)
+        t += timedelta(minutes=1)
+    assert [b.hour_start.hour for b in m.unverified_hours()] == [18]
+    assert m.breach_free and not m.credit_secured
+
+
+def test_a_short_restart_gap_still_counts_as_watched():
+    """A redeploy costs a minute or two; that must not void an otherwise clean hour."""
+    m = CreditMonitor(START, END)
+    t = START
+    while t < END:
+        m.observe(t, -1.0)
+        t += timedelta(minutes=3 if t.hour == 19 and t.minute == 30 else 1)
+    assert m.credit_secured
+
+
+def test_a_long_gap_is_neither_integrated_nor_watched():
+    m = CreditMonitor(START, END)
+    m.observe(START, 3.0)
+    m.observe(START + timedelta(minutes=20), 3.0)
+    assert m.total_import_kwh == pytest.approx(0.0)
+    assert m.buckets[START].observed_minutes == pytest.approx(0.0)

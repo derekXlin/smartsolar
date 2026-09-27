@@ -21,6 +21,11 @@ from .models import HourImport
 log = logging.getLogger(__name__)
 
 
+MAX_SAMPLE_GAP = timedelta(minutes=15)
+"""A longer gap between samples is data loss: neither integrated nor counted as
+watched. Matches the telemetry cache, which gives up on readings older than this."""
+
+
 class CreditMonitor:
     """Integrates grid import into per-clock-hour buckets across the credit window."""
 
@@ -33,7 +38,11 @@ class CreditMonitor:
 
         h = window_start.replace(minute=0, second=0, microsecond=0)
         while h < window_end:
-            self.buckets[h] = HourImport(hour_start=h, limit_kwh=limit_kwh_per_hour)
+            span = min(h + timedelta(hours=1), window_end) - max(h, window_start)
+            self.buckets[h] = HourImport(
+                hour_start=h, limit_kwh=limit_kwh_per_hour,
+                span_minutes=span.total_seconds() / 60.0,
+            )
             h += timedelta(hours=1)
 
     # ------------------------------------------------------------------ ingest
@@ -47,27 +56,28 @@ class CreditMonitor:
         import_kw = max(0.0, grid_kw)
         if self._last_sample is not None:
             prev_t, prev_kw = self._last_sample
-            dt_h = (when - prev_t).total_seconds() / 3600.0
-            if 0 < dt_h < 1.0:  # ignore absurd gaps; they are handled as data loss
-                energy = (prev_kw + import_kw) / 2.0 * dt_h
+            gap = when - prev_t
+            if timedelta(0) < gap <= MAX_SAMPLE_GAP:
+                energy = (prev_kw + import_kw) / 2.0 * gap.total_seconds() / 3600.0
                 self._add(prev_t, when, energy)
         self._last_sample = (when, import_kw)
 
     def _add(self, start: datetime, end: datetime, energy_kwh: float) -> None:
-        """Attribute energy to hour buckets, splitting across an hour boundary."""
-        if energy_kwh <= 0:
-            return
-        bucket_start = start.replace(minute=0, second=0, microsecond=0)
-        boundary = bucket_start + timedelta(hours=1)
-        if end <= boundary or (end - start).total_seconds() <= 0:
-            if bucket_start in self.buckets:
-                self.buckets[bucket_start].imported_kwh += energy_kwh
-            return
+        """Attribute energy and watched time to hour buckets, split at hour boundaries."""
         total = (end - start).total_seconds()
-        first_frac = (boundary - start).total_seconds() / total
-        if bucket_start in self.buckets:
-            self.buckets[bucket_start].imported_kwh += energy_kwh * first_frac
-        self._add(boundary, end, energy_kwh * (1.0 - first_frac))
+        t = start
+        while t < end:
+            bucket_start = t.replace(minute=0, second=0, microsecond=0)
+            piece_end = min(end, bucket_start + timedelta(hours=1))
+            bucket = self.buckets.get(bucket_start)
+            if bucket is not None:
+                # Only the part of the interval inside the window counts as watched.
+                lo, hi = max(t, self.window_start), min(piece_end, self.window_end)
+                if hi > lo:
+                    bucket.observed_minutes += (hi - lo).total_seconds() / 60.0
+                if energy_kwh > 0:
+                    bucket.imported_kwh += energy_kwh * (piece_end - t).total_seconds() / total
+            t = piece_end
 
     # ------------------------------------------------------------------ report
     def current_bucket(self, when: datetime) -> HourImport | None:
@@ -85,17 +95,38 @@ class CreditMonitor:
         return sum(b.imported_kwh for b in self.buckets.values())
 
     @property
+    def breach_free(self) -> bool:
+        """No hour has gone over the limit so far. Says nothing about unwatched time."""
+        return not any(b.breached for b in self.buckets.values())
+
+    @property
+    def credit_verified(self) -> bool:
+        """Every hour of the window was actually watched."""
+        return bool(self.buckets) and all(b.verified for b in self.buckets.values())
+
+    @property
     def credit_secured(self) -> bool:
-        """True only if every hour of the window stayed under the limit."""
-        return bool(self.buckets) and not any(b.breached for b in self.buckets.values())
+        """True only if every hour stayed under the limit AND was watched.
+
+        The buckets exist from the start, so without the coverage check a monitor
+        that never saw a single sample reported a clean pass. That is exactly the
+        ledger row a mid-window restart wrote on the first live evening.
+        """
+        return self.breach_free and self.credit_verified
 
     def breached_hours(self) -> list[HourImport]:
         return [b for b in self.buckets.values() if b.breached]
 
+    def unverified_hours(self) -> list[HourImport]:
+        return [b for b in self.buckets.values() if not b.verified]
+
     def report(self) -> str:
-        parts = [
-            f"{b.hour_start:%H:%M} {b.imported_kwh * 1000:6.1f} Wh"
-            + ("  BREACH" if b.breached else f"  ({b.headroom_kwh * 1000:5.1f} Wh left)")
-            for b in sorted(self.buckets.values(), key=lambda x: x.hour_start)
-        ]
-        return " | ".join(parts)
+        def one(b: HourImport) -> str:
+            head = f"{b.hour_start:%H:%M} {b.imported_kwh * 1000:6.1f} Wh"
+            if b.breached:
+                return head + "  BREACH"
+            if not b.verified:
+                return head + f"  UNVERIFIED ({b.observed_minutes:.0f}/{b.span_minutes:.0f} min seen)"
+            return head + f"  ({b.headroom_kwh * 1000:5.1f} Wh left)"
+
+        return " | ".join(one(b) for b in sorted(self.buckets.values(), key=lambda x: x.hour_start))

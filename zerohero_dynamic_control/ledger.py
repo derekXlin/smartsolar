@@ -61,9 +61,28 @@ class Ledger:
             },
         )
 
+    def read_samples(self, start: datetime, end: datetime) -> list[tuple[datetime, float]]:
+        """(timestamp, grid_kw) for every sample in [start, end), oldest first."""
+        if self.samples_path is None or not self.samples_path.exists():
+            return []
+        out: list[tuple[datetime, float]] = []
+        with self.samples_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    raw = json.loads(line)
+                    when = datetime.fromisoformat(raw["timestamp"])
+                    if start <= when < end:
+                        out.append((when, float(raw["grid_kw"])))
+                except (ValueError, KeyError, TypeError):
+                    continue
+        out.sort(key=lambda s: s[0])
+        return out
+
     def record_outcome(self, outcome: DailyOutcome) -> None:
         self._append(self.outcome_path, outcome.model_dump(mode="json"))
-        verdict = "SECURED" if outcome.credit_secured else "MISSED"
+        verdict = verdict_of(outcome)
+        if outcome.partial:
+            verdict += " (partial)"
         log.info(
             "day %s: %s the $1 credit | exported %.2f kWh | final SOC %.1f%% | net $%.2f",
             outcome.date, verdict, outcome.exported_kwh, outcome.final_soc_pct,
@@ -93,14 +112,33 @@ class Ledger:
         return rows
 
     def read_outcomes(self, limit: int | None = None) -> list[DailyOutcome]:
+        """One outcome per day, oldest first.
+
+        A mid-window restart writes a partial row at shutdown and a full one at
+        21:00, so the same date can appear twice. The later row saw more of the
+        window, so it is the one that stands.
+        """
         if not self.outcome_path.exists():
             return []
-        rows: list[DailyOutcome] = []
+        by_date: dict[str, DailyOutcome] = {}
         for raw in self._read_rows():
             if raw.get("kind") == "free_window":
                 continue
             try:
-                rows.append(DailyOutcome.model_validate(raw))
+                row = DailyOutcome.model_validate(raw)
             except Exception as exc:  # noqa: BLE001
                 log.warning("skipping malformed ledger row: %s", exc)
+                continue
+            by_date.pop(row.date, None)
+            by_date[row.date] = row
+        rows = sorted(by_date.values(), key=lambda r: r.date)
         return rows[-limit:] if limit else rows
+
+
+def verdict_of(outcome: DailyOutcome) -> str:
+    """SECURED, MISSED, or UNVERIFIED when no breach was seen but hours went unwatched."""
+    if outcome.credit_secured and outcome.credit_verified:
+        return "SECURED"
+    if any(h.breached for h in outcome.hourly_import):
+        return "MISSED"
+    return "UNVERIFIED"

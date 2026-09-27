@@ -190,7 +190,7 @@ def ledger(
     limit: int = typer.Option(14, help="How many days to show"),
 ) -> None:
     """Show recent daily outcomes."""
-    from .ledger import Ledger
+    from .ledger import Ledger, verdict_of
 
     cfg = _load(config, "WARNING")
     rows = Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path).read_outcomes(limit)
@@ -201,11 +201,12 @@ def ledger(
     for col in ("date", "exported", "import", "final SOC", "$1", "net $"):
         t.add_column(col, justify="right" if col != "date" else "left")
     secured = 0
+    shown = {"SECURED": "[green]YES[/]", "MISSED": "[red]NO[/]", "UNVERIFIED": "[yellow]?[/]"}
     for r in rows:
-        secured += int(r.credit_secured)
+        verdict = verdict_of(r)
+        secured += int(verdict == "SECURED")
         t.add_row(r.date, f"{r.exported_kwh:.2f}", f"{r.imported_kwh * 1000:.0f} Wh",
-                  f"{r.final_soc_pct:.0f}%",
-                  "[green]YES[/]" if r.credit_secured else "[red]NO[/]",
+                  f"{r.final_soc_pct:.0f}%", shown[verdict],
                   f"{r.estimated_revenue_aud:.2f}")
     console.print(t)
     console.print(f"credit secured on [bold]{secured}/{len(rows)}[/] days "

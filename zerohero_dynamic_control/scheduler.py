@@ -266,7 +266,9 @@ class ZeroHeroScheduler:
                 if self.assurance and self.assurance.last_outcome else None
             ),
             "credit": {
-                "secured_so_far": runner.monitor.credit_secured if runner and runner.monitor else None,
+                # No breach YET. Mid-window the later hours are unwatched by
+                # definition, so the full verdict would always read False here.
+                "secured_so_far": runner.monitor.breach_free if runner and runner.monitor else None,
                 "hours": runner.monitor.report() if runner and runner.monitor else None,
             },
         }

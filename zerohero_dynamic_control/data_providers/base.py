@@ -66,11 +66,13 @@ class CachingTelemetryProvider(TelemetryProvider):
         *,
         max_soc_rate_pct_per_min: float | None = None,
         max_rejects: int = 3,
+        soc_resolution_pct: float = 1.0,
     ) -> None:
         self.inner = inner
         self.max_age_seconds = max_age_seconds
         self.max_soc_rate_pct_per_min = max_soc_rate_pct_per_min
         self.max_rejects = max_rejects
+        self.soc_resolution_pct = soc_resolution_pct
         self.name = f"caching({inner.name})"
         self._last: Telemetry | None = None
         self.consecutive_failures = 0
@@ -92,6 +94,13 @@ class CachingTelemetryProvider(TelemetryProvider):
         both the credit and the charge. Neither is recoverable after the fact,
         so a physically impossible sample is discarded in favour of the last
         good one.
+
+        The ceiling includes one reporting step. FoxESS reports SOC in whole
+        points, so a pack at 55.5% ticking to 54.4% reads as a full point in a
+        minute. Without the step allowance every ordinary tick was rejected — 19
+        times on the first live evening — and each rejection threw away the fresh
+        snapshot and dropped the loop to its blind fallback. At 18:50 the discarded
+        snapshot was the one showing a 4 kW load spike.
         """
         if self.max_soc_rate_pct_per_min is None or self._last is None:
             return None
@@ -100,7 +109,8 @@ class CachingTelemetryProvider(TelemetryProvider):
             # A long gap (restart, outage) legitimately allows a large change.
             return None
         delta = abs(reading.soc_pct - self._last.soc_pct)
-        ceiling = self.max_soc_rate_pct_per_min * dt_min * 1.5   # 50% headroom
+        # 50% headroom on the physics, plus one reporting step of quantisation.
+        ceiling = self.max_soc_rate_pct_per_min * dt_min * 1.5 + self.soc_resolution_pct
         if delta > ceiling:
             return (
                 f"SOC moved {delta:.1f} points in {dt_min:.1f} min "
