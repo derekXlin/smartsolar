@@ -245,3 +245,22 @@ def test_energy_balance_is_self_consistent(cfg, engine):
     d = engine.plan(now=now, telemetry=tel, solar_kw_at=flat(0.0), load_kw_at=flat(3.0))
     implied = soc_to_energy(d.starting_soc_pct - d.expected_final_soc, cfg.battery.usable_capacity_kwh)
     assert implied == pytest.approx(d.battery_dc_drawn_kwh, rel=0.01)
+
+
+def test_block_allocation_exports_at_full_power_first(cfg, engine):
+    """The owner's pattern: sell hard at the start, then stop. A thin export spread
+    over three hours is too small to act as a buffer, so it would buy no safety."""
+    from zerohero_dynamic_control.models import AllocationShape
+
+    cfg.strategy.allocation = AllocationShape.BLOCK
+    cfg.strategy.objective = ObjectiveMode.MAXIMISE_EXPORT
+    now = at(2026, 1, 15)
+    d = engine.plan(now=now, telemetry=make_telemetry(cfg, now, 95.0, 1.5),
+                    solar_kw_at=flat(0.0), load_kw_at=flat(1.5))
+    exports = [s.export_discharge_kw for s in d.slots]
+    first_zero = next((i for i, e in enumerate(exports) if e < 1e-9), len(exports))
+    assert first_zero > 0 and all(e < 1e-9 for e in exports[first_zero:]), "one contiguous block"
+    full = [e for e, s in zip(exports[:first_zero], d.slots, strict=False)
+            if abs(e - s.export_headroom_kw) < 1e-6]
+    assert len(full) >= first_zero - 1, "every slot but the last runs at full headroom"
+    assert any(r.startswith("control: force-discharge 18:00") for r in d.rationale)

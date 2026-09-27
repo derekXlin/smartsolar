@@ -276,6 +276,17 @@ class DecisionEngine:
                     f"abandon_credit_if_unwinnable=False — discharging to the hard floor anyway"
                 )
 
+        # ---- how the loop will run it ----------------------------------------
+        forced = [s for s in slots if s.export_discharge_kw >= cfg.strategy.min_force_export_kw]
+        if recommended_mode is BatteryMode.FORCE_EXPORT and forced:
+            rationale.append(
+                f"control: force-discharge {forced[0].start:%H:%M}-{forced[-1].end:%H:%M} "
+                f"exporting {sum(s.export_discharge_kw * s.hours for s in forced):.1f} kWh, "
+                f"self-use for the rest of the window"
+            )
+        else:
+            rationale.append("control: self-use for the whole window — the inverter follows the load")
+
         # ---- roll up ---------------------------------------------------------
         total_ac_kwh = sum(s.battery_ac_kw * s.hours for s in slots)
         total_dc_kwh = total_ac_kwh / cfg.battery.discharge_efficiency
@@ -480,6 +491,17 @@ class DecisionEngine:
         is saturated.
         """
         if budget_ac_kwh <= 1e-9 or not slots:
+            return
+
+        if self.cfg.strategy.allocation is AllocationShape.BLOCK:
+            # Fill slots in time order at their full headroom until the budget runs out.
+            remaining = budget_ac_kwh
+            for s in slots:
+                take = min(remaining, s.export_headroom_kw * s.hours)
+                s.export_discharge_kw = take / s.hours if s.hours > 0 else 0.0
+                remaining -= take
+                if remaining <= 1e-9:
+                    break
             return
 
         weights = self._shape_weights(slots)

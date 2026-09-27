@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from zerohero_dynamic_control.config import AppConfig
+from zerohero_dynamic_control.models import BatteryMode
 from zerohero_dynamic_control.simulation import SCENARIOS, run_scenario
 
 WINNABLE = ["summer", "winter", "cloudy", "high_load"]
@@ -60,7 +61,8 @@ async def test_depleted_battery_fails_gracefully_not_catastrophically():
     assert not r.outcome.credit_secured
     assert r.outcome.final_soc_pct >= cfg.battery.emergency_floor_soc_pct - 0.5
     assert not r.decision.credit_achievable
-    assert any("blocked" in v for v in r.safety_violations)
+    # Abandoned credit: the battery serves the house in self-use, never forced.
+    assert r.commands and all(c.mode is BatteryMode.SELF_CONSUMPTION for c in r.commands)
 
 
 @pytest.mark.asyncio
@@ -95,3 +97,80 @@ async def test_badly_wrong_forecast_still_secures_the_credit():
 async def test_window_closes_in_self_consumption():
     r = await run_scenario(SCENARIOS["summer"])
     assert r.site.mode.value == "self_consumption"
+
+
+# --------------------------------------- the first live evening, reproduced
+async def _evening_with_cloud_lag_and_a_load_step(min_force_export_kw: float) -> dict[int, float]:
+    """Telemetry refreshed only every 5 minutes, like the FoxESS cloud feed, and a
+    2.2 kW load step at 18:50 for 5 minutes. Returns TRUE import (Wh) per hour,
+    measured by the simulated site's own meter, not by the lagged telemetry."""
+    from datetime import datetime, timedelta
+
+    from zerohero_dynamic_control.clock import SimClock
+    from zerohero_dynamic_control.controllers.base import SafetyWrapper
+    from zerohero_dynamic_control.controllers.simulated import SimulatedBatteryController
+    from zerohero_dynamic_control.data_providers.base import TelemetryProvider
+    from zerohero_dynamic_control.data_providers.simulated import SimulatedSite
+    from zerohero_dynamic_control.runtime import EveningRunner
+    from zerohero_dynamic_control.simulation.harness import ScenarioForecastProvider
+    from zerohero_dynamic_control.simulation.profiles import load_curve, solar_curve
+
+    cfg = AppConfig()
+    cfg.strategy.min_force_export_kw = min_force_export_kw
+    scenario = SCENARIOS["winter"]
+    tz = cfg.site.tz
+    day = scenario.day
+    base_load = load_curve(scenario)
+    step_at = datetime(day.year, day.month, day.day, 18, 50, tzinfo=tz)
+
+    def load(when):
+        return base_load(when) + (2.2 if step_at <= when < step_at + timedelta(minutes=5) else 0.0)
+
+    site = SimulatedSite(cfg, solar_kw_at=solar_curve(scenario, tz), load_kw_at=load,
+                         start_soc_pct=scenario.start_soc_pct)
+
+    class CloudLag(TelemetryProvider):
+        name = "cloud-lag"
+
+        def __init__(self):
+            self.snapshot = None
+
+        async def read(self, now):
+            reading = await site.read(now)          # the physics advances every tick
+            if self.snapshot is None or (now - self.snapshot.timestamp) >= timedelta(minutes=5):
+                self.snapshot = reading
+            return self.snapshot.model_copy(update={"timestamp": now})
+
+    start = datetime(day.year, day.month, day.day, 17, 50, tzinfo=tz)
+    runner = EveningRunner(
+        cfg, telemetry=CloudLag(),
+        forecast=ScenarioForecastProvider(scenario, cfg, 1.0, 1.0),
+        controller=SafetyWrapper(SimulatedBatteryController(site), max_power_kw=cfg.inverter.ac_limit_kw,
+                                 min_soc_pct=cfg.battery.emergency_floor_soc_pct),
+        ledger=None, clock=SimClock(start, speed=0.0),
+    )
+    await runner.make_decision()
+    await runner.run_window()
+
+    wh: dict[int, float] = {18: 0.0, 19: 0.0, 20: 0.0}
+    for prev, cur in zip(site.history, site.history[1:], strict=False):
+        if prev.timestamp.hour in wh:
+            dt_h = (cur.timestamp - prev.timestamp).total_seconds() / 3600
+            wh[prev.timestamp.hour] += max(0.0, cur.grid_kw) * dt_h * 1000
+    return wh
+
+
+@pytest.mark.asyncio
+async def test_old_policy_loses_the_hour_to_a_load_step_behind_cloud_lag():
+    """min_force_export_kw=0 is the old behaviour: force-discharge at load + 0.25 kW
+    all evening. With five-minute-old data it cannot see the step in time."""
+    wh = await _evening_with_cloud_lag_and_a_load_step(min_force_export_kw=0.0)
+    assert wh[18] > 30.0, wh
+
+
+@pytest.mark.asyncio
+async def test_self_use_absorbs_the_same_load_step():
+    """The owner's pattern: self-use unless exporting hard. The inverter covers the
+    step from its own meter, so every hour stays under 30 Wh."""
+    wh = await _evening_with_cloud_lag_and_a_load_step(min_force_export_kw=3.0)
+    assert all(v < 30.0 for v in wh.values()), wh

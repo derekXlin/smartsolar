@@ -183,6 +183,20 @@ vs overnight blend $0.424, so tonight wins).
 
 ## 5. The control loop
 
+**Self-use by default.** For most of the window the inverter runs self-use: it
+matches the house load from its own meter within about a second, which no cloud
+loop can do. Force-discharge is used only while the plan exports at least
+`min_force_export_kw` (3 kW); the export itself is then the buffer that absorbs a
+load spike. Export is allocated as one block at full power from 18:00, so it
+ends in a single switch to self-use. The opening command is written at 17:50;
+FoxESS groups are bounded to 18:00-20:59, so writing early changes nothing before
+the window. The first live evening ran force-discharge at load + 0.25 kW for all
+three hours and lost 18:00 to a 2 kW load step hidden by the cloud's 5-minute lag;
+the owner's manual pattern (full-power export 18:00-19:00, then self-use) had
+secured every day.
+
+While force-discharging:
+
 The 17:50 plan is a forecast. Reality diverges, so the loop closes on the **grid
 meter** — the number the retailer actually bills:
 

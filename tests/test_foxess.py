@@ -19,6 +19,7 @@ from zerohero_dynamic_control.foxess_client import (
     FoxESSError,
     FoxESSQuotaExhausted,
 )
+from zerohero_dynamic_control.models import BatteryMode, ControlCommand
 
 from .conftest import TZ
 
@@ -283,20 +284,66 @@ async def test_disables_scheduler_when_no_baseline_could_be_read():
     assert any("/scheduler/set/flag" in c[0] for c in client.calls)
 
 
-@pytest.mark.asyncio
-async def test_self_consumption_restores_rather_than_writing_a_group():
-    """Returning to normal means handing the inverter back, not pinning it to
-    a SelfUse group that would outlive our window."""
-    baseline = [{"enable": 1, "startHour": 2, "startMinute": 0,
-                "endHour": 4, "endMinute": 59, "workMode": "ForceCharge"}]
-    client = FakeFoxESS(responses={"/op/v0/device/scheduler/get": {"groups": baseline}})
-    ctl = build_controller(client)
-    from zerohero_dynamic_control.models import BatteryMode
+OWNER = [
+    {"enable": 1, "startHour": 11, "startMinute": 1, "endHour": 13, "endMinute": 59,
+     "workMode": "ForceCharge", "fdPwr": 10000, "fdSoc": 100, "minSocOnGrid": 10, "maxSoc": 100},
+    {"enable": 1, "startHour": 18, "startMinute": 0, "endHour": 19, "endMinute": 5,
+     "workMode": "ForceDischarge", "fdPwr": 10000, "fdSoc": 10, "minSocOnGrid": 10, "maxSoc": 100},
+]
+"""The live site's own schedule, as scheduler/get returned it on 2026-09-27."""
 
-    now = datetime(2026, 1, 15, 21, 0, tzinfo=TZ)
-    await ctl.set_mode(BatteryMode.FORCE_EXPORT, now=now)
-    await ctl.set_mode(BatteryMode.SELF_CONSUMPTION, now=now)
-    assert [c for c in client.calls if c[0].endswith("/scheduler/enable")][-1][1]["groups"] == baseline
+
+def _writes(client: FakeFoxESS) -> list[list[dict]]:
+    return [c[1]["groups"] for c in client.calls if c[0].endswith("/scheduler/enable")]
+
+
+@pytest.mark.asyncio
+async def test_self_use_in_the_window_is_our_own_group_not_the_owners_schedule():
+    """The owner's schedule force-discharges 18:00-19:05 at 10 kW. 'Self-use' used
+    to mean restoring it, which mid-window starts a 10 kW discharge instead."""
+    client = FakeFoxESS(responses={"/op/v0/device/scheduler/get": {"groups": OWNER}})
+    ctl = build_controller(client)
+    now = datetime(2026, 9, 28, 17, 50, tzinfo=TZ)
+    await ctl.apply(ControlCommand(timestamp=now, mode=BatteryMode.SELF_CONSUMPTION, power_kw=0.0))
+    groups = _writes(client)[-1]
+    ours = [g for g in groups if g["startHour"] == 18]
+    assert len(ours) == 1 and ours[0]["workMode"] == "SelfUse" and ours[0]["fdPwr"] == 0
+    assert (ours[0]["endHour"], ours[0]["endMinute"]) == (20, 59), "bounded to the window"
+    assert any(g["workMode"] == "ForceCharge" for g in groups), "the free-window group survives"
+
+
+@pytest.mark.asyncio
+async def test_release_hands_back_the_owners_schedule():
+    client = FakeFoxESS(responses={"/op/v0/device/scheduler/get": {"groups": OWNER}})
+    ctl = build_controller(client)
+    now = datetime(2026, 9, 28, 21, 0, tzinfo=TZ)
+    await ctl.apply(ControlCommand(timestamp=now, mode=BatteryMode.FORCE_EXPORT, power_kw=8.0))
+    await ctl.release(now=now, reason="credit window closed")
+    assert _writes(client)[-1] == OWNER
+    assert ctl.last_command is None, "the next window must write its first command"
+
+
+@pytest.mark.asyncio
+async def test_entering_force_discharge_is_one_write_at_the_commanded_power():
+    """Mode then power as two writes sent fdPwr=0 first: a battery forced to
+    discharge at 0 W sits still and the house imports until the second lands."""
+    client = FakeFoxESS(responses={"/op/v0/device/scheduler/get": {"groups": OWNER}})
+    ctl = build_controller(client)
+    now = datetime(2026, 9, 28, 18, 0, tzinfo=TZ)
+    await ctl.apply(ControlCommand(timestamp=now, mode=BatteryMode.FORCE_EXPORT, power_kw=8.2))
+    writes = _writes(client)
+    assert len(writes) == 1
+    ours = [g for g in writes[0] if g["startHour"] == 18][0]
+    assert ours["workMode"] == "ForceDischarge" and ours["fdPwr"] == 8200
+
+
+def test_a_self_use_group_in_our_window_is_recognised_as_ours():
+    """A crashed run can leave our SelfUse group behind; adopting it as the owner's
+    would 'restore' it every night after."""
+    ctl = build_controller(FakeFoxESS())
+    ours = {"workMode": "SelfUse", "startHour": 18, "startMinute": 0, "endHour": 20, "endMinute": 59}
+    assert ctl._is_ours(ours)
+    assert not ctl._is_ours(OWNER[1]), "the owner's 18:00-19:05 group is theirs"
 
 
 @pytest.mark.asyncio

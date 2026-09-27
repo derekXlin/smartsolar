@@ -55,6 +55,11 @@ class ControllerCapabilities:
     """Rate limit imposed by the vendor API. The loop will not command faster."""
     power_resolution_kw: float = 0.1
     max_power_kw: float = 10.0
+    window_bounded: bool = False
+    """True if a command only takes effect inside the credit window (FoxESS writes a
+    scheduler group bounded to 18:00-20:59). Only then is it safe to send the
+    window's opening command early; anything that acts immediately would start
+    discharging at 17:50."""
 
 
 class BatteryController(abc.ABC):
@@ -89,6 +94,20 @@ class BatteryController(abc.ABC):
             await self.set_power(command.power_kw, now=command.timestamp, reason=command.reason)
         self.last_command = command
         self.command_log.append(command)
+
+    async def release(self, *, now: datetime, reason: str = "") -> None:
+        """Hand the battery back to its owner's normal behaviour after a window.
+
+        Distinct from SELF_CONSUMPTION, which is a mode we hold DURING a window.
+        On FoxESS the two differ sharply: the owner's own schedule may itself
+        force-discharge (this site's does, 18:00-19:05 at 10 kW), so "go back to
+        normal" must never be used to mean "self-use now".
+        """
+        await self.apply(ControlCommand(
+            timestamp=now, mode=BatteryMode.SELF_CONSUMPTION, power_kw=0.0, reason=reason))
+        # Forget it: the next window must write its first command even if it
+        # happens to match this one, or the owner's schedule stays in charge.
+        self.last_command = None
 
     async def health_check(self) -> bool:
         """Cheap liveness probe, run before the window opens."""
@@ -156,6 +175,10 @@ class SafetyWrapper(BatteryController):
         await self.inner.apply(safe)
         self.last_command = safe
         self.command_log.append(safe)
+
+    async def release(self, *, now: datetime, reason: str = "") -> None:
+        await self.inner.release(now=now, reason=reason)
+        self.last_command = None
 
     async def read_schedule(self) -> list[dict]:
         """Pass-through so the free-window audit can see the real schedule."""

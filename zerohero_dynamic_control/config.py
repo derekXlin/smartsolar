@@ -203,7 +203,19 @@ class FreeWindowAssuranceConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     objective: ObjectiveMode = ObjectiveMode.ECONOMIC
-    allocation: AllocationShape = AllocationShape.FRONT_LOADED
+    allocation: AllocationShape = AllocationShape.BLOCK
+
+    min_force_export_kw: float = Field(3.0, ge=0)
+    """Force-discharge only while the plan exports at least this much. Otherwise
+    the inverter runs self-use for the window.
+
+    Self-use is what protects the credit: the inverter matches the house load
+    from its own meter within about a second. Force-discharge holds a fixed power
+    and leaves anything above it to the grid, and the loop only sees the house
+    through a cloud feed minutes old. So force-discharge is safe only when the
+    export itself is big enough to absorb a load spike until the loop catches
+    up — a kettle or oven is 2-3.6 kW. This is the owner's proven pattern:
+    18:00-19:00 force-discharge at full power, then self-use, credit every day."""
 
     slot_minutes: int = Field(5, ge=1, le=30)
     """Planning resolution inside the credit window."""

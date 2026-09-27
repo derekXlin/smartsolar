@@ -79,6 +79,12 @@ class AllocationShape(StrEnum):
     SOLAR_FOLLOWING = "solar_following"
     """Export more while PV is still producing, so battery drain stays level."""
 
+    BLOCK = "block"
+    """Export at full power from the window's start until the budget is spent, then
+    stop. The only shape that works with self-use between exports: a thin export
+    spread across the window is too small to act as a buffer against load spikes,
+    so it would be force-discharged with no protection or not sold at all."""
+
 
 class Telemetry(BaseModel):
     """A single instantaneous read of the site."""

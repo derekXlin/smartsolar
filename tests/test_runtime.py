@@ -16,7 +16,7 @@ from zerohero_dynamic_control.data_providers.base import (
     ProviderError,
     TelemetryProvider,
 )
-from zerohero_dynamic_control.models import ForecastPoint, Telemetry, soc_to_energy
+from zerohero_dynamic_control.models import BatteryMode, ForecastPoint, Telemetry, soc_to_energy
 from zerohero_dynamic_control.runtime import EveningRunner
 
 from .conftest import TZ
@@ -428,6 +428,7 @@ async def test_raises_go_out_at_once_and_lowers_wait():
     t0 = datetime(2026, 9, 28, 18, 30, tzinfo=TZ)
     site = LoadScript()
     runner = build_runner(cfg, site, BoomForecast(), t0)
+    runner.choose_mode = lambda tel, now: (BatteryMode.FORCE_EXPORT, "exporting")
 
     await runner.tick(t0)
     first = runner.controller.last_command.power_kw
@@ -454,8 +455,87 @@ async def test_no_pacing_by_default():
     t0 = datetime(2026, 9, 28, 18, 30, tzinfo=TZ)
     site = LoadScript()
     runner = build_runner(cfg, site, BoomForecast(), t0)
+    runner.choose_mode = lambda tel, now: (BatteryMode.FORCE_EXPORT, "exporting")
     await runner.tick(t0)
     first = runner.controller.last_command.power_kw
     site.load_kw = 1.0
     await runner.tick(t0 + timedelta(seconds=60))
     assert runner.controller.last_command.power_kw < first
+
+
+# ------------------------------------------------- self-use unless exporting
+def _decision_with_export(cfg, start, export_kw_by_minute):
+    """A decision whose slots export the given kW from each minute offset onward."""
+    from zerohero_dynamic_control.models import Decision, SlotPlan
+
+    slots = []
+    for m in range(0, 180, 5):
+        kw = 0.0
+        for at, v in sorted(export_kw_by_minute.items()):
+            if m >= at:
+                kw = v
+        slots.append(SlotPlan(start=start + timedelta(minutes=m), end=start + timedelta(minutes=m + 5),
+                              solar_kw=0.0, load_kw=2.0, mandatory_discharge_kw=2.25,
+                              export_discharge_kw=kw, export_headroom_kw=7.75))
+    return Decision(
+        made_at=start - timedelta(minutes=10), window_start=start, window_end=start + timedelta(hours=3),
+        starting_soc_pct=90.0, starting_energy_kwh=soc_to_energy(90.0, 47.0), target_export_kwh=0,
+        mandatory_discharge_kwh=6.75, opportunistic_export_kwh=0, passive_solar_export_kwh=0,
+        recommended_discharge_kw=2.25, peak_discharge_kw=10, expected_final_soc=50,
+        expected_final_energy_kwh=20, battery_dc_drawn_kwh=10, reserve_floor_soc_pct=25,
+        overnight_retention_kwh=15, energy_shortfall_kwh=0, expected_net_aud=0,
+        slots=slots, credit_achievable=True, recommended_mode=BatteryMode.FORCE_EXPORT,
+    )
+
+
+def test_force_discharge_only_while_the_export_is_a_real_buffer():
+    cfg = AppConfig()
+    start = datetime(2026, 9, 28, 18, 0, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(), BoomForecast(), start)
+    runner.decision = _decision_with_export(cfg, start, {0: 7.5, 40: 1.0, 60: 0.0})
+    tel = Telemetry(timestamp=start, soc_pct=90.0, battery_energy_kwh=soc_to_energy(90.0, 47.0),
+                    load_kw=2.0, battery_kw=2.0, grid_kw=0.0)
+    assert runner.choose_mode(tel, start + timedelta(minutes=10))[0] is BatteryMode.FORCE_EXPORT
+    assert runner.choose_mode(tel, start + timedelta(minutes=45))[0] is BatteryMode.SELF_CONSUMPTION, \
+        "1 kW of export is no buffer against a kettle"
+    assert runner.choose_mode(tel, start + timedelta(minutes=90))[0] is BatteryMode.SELF_CONSUMPTION
+
+
+def test_no_plan_or_an_abandoned_credit_means_self_use():
+    cfg = AppConfig()
+    start = datetime(2026, 9, 28, 18, 0, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(), BoomForecast(), start)
+    assert runner.choose_mode(None, start)[0] is BatteryMode.SELF_CONSUMPTION
+    runner.decision = _decision_with_export(cfg, start, {0: 7.5})
+    runner.decision.recommended_mode = BatteryMode.SELF_CONSUMPTION
+    assert runner.choose_mode(None, start)[0] is BatteryMode.SELF_CONSUMPTION
+    runner.decision.recommended_mode = BatteryMode.FORCE_EXPORT
+    runner.manual_override_kw = 4.0
+    runner.decision.slots = []
+    assert runner.choose_mode(None, start)[0] is BatteryMode.FORCE_EXPORT, "an override always forces"
+
+
+class BoundedPrinter(PrintingBatteryController):
+    def capabilities(self):
+        from dataclasses import replace
+
+        return replace(super().capabilities(), window_bounded=True)
+
+
+@pytest.mark.asyncio
+async def test_window_bounded_controllers_are_prearmed_at_decision_time():
+    """FoxESS groups are bounded to 18:00-20:59, so writing at 17:50 changes nothing
+    before 18:00 and removes the gap while the first 18:00 write is in flight."""
+    cfg = AppConfig()
+    t = datetime(2026, 9, 28, 17, 50, tzinfo=TZ)
+    start = datetime(2026, 9, 28, 18, 0, tzinfo=TZ)
+    for inner, expect in ((BoundedPrinter(quiet=True), True), (PrintingBatteryController(quiet=True), False)):
+        runner = EveningRunner(cfg, telemetry=BoomTelemetry(fail_after=99), forecast=BoomForecast(),
+                               controller=inner, ledger=None, clock=SimClock(t))
+        runner.decision = _decision_with_export(cfg, start, {0: 7.5})
+        runner.decision.window_end = start + timedelta(minutes=1)
+        await runner.run_window()
+        early = [c for c in inner.command_log if c.timestamp < start]
+        assert bool(early) is expect
+        if expect:
+            assert early[0].mode is BatteryMode.FORCE_EXPORT and early[0].power_kw == pytest.approx(9.75)

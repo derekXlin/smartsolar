@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from ..foxess_client import FoxESSClient, FoxESSError, FoxESSQuotaExhausted
-from ..models import BatteryMode
+from ..models import BatteryMode, ControlCommand
 from .base import BatteryController, ControllerCapabilities, ControllerError
 
 log = logging.getLogger(__name__)
@@ -122,13 +122,19 @@ class FoxESSController(BatteryController):
             min_command_interval_seconds=2.0,  # documented update limit
             power_resolution_kw=0.001,      # fdPwr is an integer number of watts
             max_power_kw=self.max_power_kw,
+            window_bounded=True,            # every group is bounded to the window
         )
 
     # ------------------------------------------------------------- baseline
     def _is_ours(self, group: dict[str, Any]) -> bool:
-        """A group we wrote on an earlier run, not the owner's."""
+        """A group we wrote on an earlier run, not the owner's.
+
+        Matched on our exact window, whatever its mode: we write SelfUse groups
+        there too. Matching ForceDischarge alone would adopt a SelfUse group left
+        by a crashed run as the owner's, and "restore" it every night after.
+        """
         return (
-            group.get("workMode") == "ForceDischarge"
+            group.get("workMode") in ("ForceDischarge", "SelfUse")
             and self._minutes(group, "start", 0) == self.window_start.hour * 60 + self.window_start.minute
             and self._minutes(group, "end", 23) == self._end_hour() * 60 + self._group_end_minute()
         )
@@ -357,13 +363,39 @@ class FoxESSController(BatteryController):
         self._mode, self._power_kw = mode, power_kw
 
     # ------------------------------------------------------------- interface
+    async def apply(self, command: ControlCommand) -> None:
+        """Mode and power in ONE scheduler write.
+
+        The generic apply() calls set_mode then set_power, which here is two
+        writes, and the first carried the previous power. Entering
+        ForceDischarge from idle therefore wrote fdPwr=0 first: a battery forced
+        to discharge at 0 W sits still and the house imports until the second
+        write lands. It did exactly that at 18:17 on the first live evening.
+        """
+        mode, kw = command.mode, command.power_kw
+        if mode in (BatteryMode.SELF_CONSUMPTION, BatteryMode.HOLD):
+            if self._mode is not mode or self.last_command is None:
+                log.info("FoxESS mode -> SelfUse for the window (%s)", command.reason)
+                await self._push(mode, 0.0)
+        else:
+            log.info("FoxESS %s %d W (%s)", MODE_MAP.get(mode, "SelfUse"),
+                     int(round(abs(kw) * 1000)), command.reason)
+            await self._push(mode, kw)
+        self.last_command = command
+        self.command_log.append(command)
+
+    async def release(self, *, now: datetime, reason: str = "") -> None:
+        await self.restore(now=now, reason=reason)
+        self.last_command = None
+
     async def set_mode(self, mode: BatteryMode, *, now: datetime, reason: str = "") -> None:
         log.info("FoxESS mode -> %s (%s)", MODE_MAP.get(mode, "SelfUse"), reason)
-        if mode in (BatteryMode.SELF_CONSUMPTION, BatteryMode.HOLD):
-            await self.restore(now=now, reason=reason)
-            self._mode = mode
-            return
-        await self._push(mode, self._power_kw)
+        # SelfUse here means self-use for OUR window, written as our own group.
+        # Handing the inverter back to the owner is release(), not this: their
+        # schedule force-discharges 18:00-19:05, so restoring it mid-window
+        # would start a 10 kW discharge, not self-use.
+        power = 0.0 if mode in (BatteryMode.SELF_CONSUMPTION, BatteryMode.HOLD) else self._power_kw
+        await self._push(mode, power)
 
     async def set_power(self, power_kw: float, *, now: datetime, reason: str = "") -> None:
         if self._mode in (BatteryMode.SELF_CONSUMPTION, BatteryMode.HOLD):

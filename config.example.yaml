@@ -86,8 +86,17 @@ strategy:
   # maximise_export        sell everything above the planning reserve
   objective: economic
 
-  # constant | front_loaded | solar_following
-  allocation: front_loaded
+  # block | constant | front_loaded | solar_following
+  # block: sell at full power from 18:00 until the budget is spent, then stop.
+  # Use block: the other shapes spread export too thin to act as a buffer.
+  allocation: block
+
+  # Force-discharge only while exporting at least this much; otherwise run
+  # SELF-USE, where the inverter matches the house load from its own meter in
+  # about a second. A kettle or oven is 2-3.6 kW, and in force-discharge anything
+  # above the set power comes from the grid until a 5-minute-old cloud reading
+  # catches up. Same pattern as a manual 18:00-19:00 force-discharge + self-use.
+  min_force_export_kw: 3.0
 
   slot_minutes: 5
   control_interval_seconds: 60

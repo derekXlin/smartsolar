@@ -22,7 +22,7 @@ from ..controllers.simulated import SimulatedBatteryController
 from ..data_providers.base import ForecastProvider
 from ..data_providers.simulated import SimulatedSite
 from ..ledger import Ledger
-from ..models import DailyOutcome, Decision, ForecastPoint
+from ..models import ControlCommand, DailyOutcome, Decision, ForecastPoint
 from ..runtime import EveningRunner
 from ..solar_geometry import sunset
 from .profiles import SITE_LAT, SITE_LON, Scenario, load_curve, solar_curve
@@ -73,6 +73,7 @@ class SimulationResult:
     site: SimulatedSite
     sunset_local: datetime
     safety_violations: list[str]
+    commands: list[ControlCommand]
 
 
 async def run_scenario(
@@ -121,6 +122,7 @@ async def run_scenario(
         site=site,
         sunset_local=sunset(day, SITE_LAT, SITE_LON, tz),
         safety_violations=list(controller.violations),
+        commands=list(controller.command_log),
     )
 
 

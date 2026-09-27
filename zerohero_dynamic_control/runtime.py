@@ -304,24 +304,53 @@ class EveningRunner:
         ceiling = min(ceiling, cfg.inverter.grid_export_limit_kw + tel.load_kw - tel.solar_kw)
         return max(0.0, ceiling)
 
+    def choose_mode(self, tel: Telemetry | None, now: datetime) -> tuple[BatteryMode, str]:
+        """Self-use unless the plan is exporting enough to act as its own buffer.
+
+        Self-use is what protects the credit: the inverter matches the house load
+        from its own meter within about a second. Force-discharge holds a fixed
+        power, leaves anything above it to the grid, and we only see the house
+        through a cloud feed minutes old. The first live evening force-discharged
+        at load + 0.25 kW for three hours and lost 18:00 to a 2 kW load step; the
+        owner's own schedule (full-power export 18:00-19:00, then self-use) had
+        secured the credit every day.
+
+        So force-discharge happens only while the planned export is at least
+        min_force_export_kw: then a load spike just trims the export.
+        """
+        if self.manual_override_kw is not None:
+            return BatteryMode.FORCE_EXPORT, "manual override"
+        if self.decision is None or self.decision.recommended_mode is not BatteryMode.FORCE_EXPORT:
+            return BatteryMode.SELF_CONSUMPTION, "self-use: credit abandoned, battery serves the house"
+        slot = self._slot_for(now)
+        export_kw = slot.export_discharge_kw if slot else 0.0
+        if export_kw < self.cfg.strategy.min_force_export_kw:
+            return BatteryMode.SELF_CONSUMPTION, "self-use: the inverter follows the load itself"
+        if tel is not None and not tel.stale:
+            suspend, guard_note = self._energy_guard(tel, now)
+            if suspend:
+                return BatteryMode.SELF_CONSUMPTION, f"self-use: {guard_note}"
+        return BatteryMode.FORCE_EXPORT, f"exporting {export_kw:.1f} kW"
+
     def compute_setpoint(self, tel: Telemetry, now: datetime) -> tuple[float, str]:
-        """The core control law. Returns (battery_kw, reason)."""
+        """The force-discharge control law. Returns (battery_kw, reason)."""
         if self.manual_override_kw is not None:
             return self.manual_override_kw, "manual override"
 
         if tel.stale:
             # Flying blind: fall back to the simple, documented behaviour — force
-            # export at a fixed rate until 21:00. It will not be optimal, but it is
-            # predictable and it keeps the battery pushing against the house load.
-            # Never BELOW what we were already commanding, though: the last
-            # setpoint answered the last load we saw, and dropping it on no new
-            # information is how 18:55 on the first live evening cut 4.75 kW to
-            # 3.0 kW while the house was still drawing 4 kW.
+            # export at a fixed rate. It will not be optimal, but it is predictable
+            # and it keeps the battery pushing against the house load. Never BELOW
+            # what we were already commanding or what the plan wants, though: the
+            # last setpoint answered the last load we saw, and dropping it on no
+            # new information is how 18:55 on the first live evening cut 4.75 kW
+            # to 3.0 kW while the house was still drawing 4 kW.
+            slot = self._slot_for(now)
+            planned = slot.battery_ac_kw if slot else 0.0
+            hold = max(self.last_setpoint_kw, planned)
             fallback = self.cfg.strategy.fallback_discharge_kw
-            if self.last_setpoint_kw > fallback:
-                return self.last_setpoint_kw, (
-                    f"FALLBACK: telemetry stale, holding {self.last_setpoint_kw:.2f} kW"
-                )
+            if hold > fallback:
+                return min(hold, self._ceiling_kw(tel)), f"FALLBACK: telemetry stale, holding {hold:.2f} kW"
             return fallback, "FALLBACK: telemetry stale"
 
         slot = self._slot_for(now)
@@ -368,12 +397,11 @@ class EveningRunner:
             self.controller.observe_soc(tel.soc_pct)
         self._account(now, tel.grid_kw)
 
-        setpoint, reason = self.compute_setpoint(tel, now)
-        mode = (
-            self.decision.recommended_mode
-            if self.decision and self.decision.recommended_mode is not BatteryMode.FORCE_EXPORT
-            else BatteryMode.FORCE_EXPORT
-        )
+        mode, reason = self.choose_mode(tel, now)
+        if mode is BatteryMode.FORCE_EXPORT:
+            setpoint, reason = self.compute_setpoint(tel, now)
+        else:
+            setpoint = 0.0
 
         last = self.controller.last_command
         changed = (
@@ -404,11 +432,13 @@ class EveningRunner:
         replan_every = max(1, self.cfg.strategy.replan_minutes * 60 // interval)
 
         now = self.clock.now()
+        if now < decision.window_start and self.controller.capabilities().window_bounded:
+            await self._prearm(decision, now)
         while now < decision.window_start:
             await self.clock.sleep(min(interval, (decision.window_start - now).total_seconds()))
             now = self.clock.now()
 
-        log.info("window open — entering %s", decision.recommended_mode.value)
+        log.info("window open")
         ticks = 0
         while self.clock.now() < decision.window_end:
             await self.tick()
@@ -418,6 +448,24 @@ class EveningRunner:
             await self.clock.sleep(interval)
 
         return await self.close_out()
+
+    async def _prearm(self, decision: Decision, now: datetime) -> None:
+        """Write the window's opening command at decision time, not at 18:00.
+
+        The command is a scheduler group bounded to the window, so writing it
+        early changes nothing before 18:00. What it removes is the gap at 18:00
+        between the window opening and a cloud write landing, during which the
+        owner's own schedule is in charge.
+        """
+        mode, reason = self.choose_mode(None, decision.window_start)
+        slot = self._slot_for(decision.window_start)
+        kw = slot.battery_ac_kw if mode is BatteryMode.FORCE_EXPORT and slot else 0.0
+        try:
+            await self.controller.apply(ControlCommand(
+                timestamp=now, mode=mode, power_kw=kw,
+                reason=f"pre-armed for {decision.window_start:%H:%M}: {reason}"))
+        except Exception as exc:  # noqa: BLE001 - the first tick at 18:00 writes it anyway
+            log.warning("could not pre-arm the window (%s); the first tick will write it", exc)
 
     async def _replan(self) -> None:
         """Rebuild the plan mid-window from fresh telemetry and forecasts."""
@@ -451,14 +499,7 @@ class EveningRunner:
     async def close_out(self) -> DailyOutcome:
         """Return the battery to normal and write the day's outcome."""
         now = self.clock.now()
-        await self.controller.apply(
-            ControlCommand(
-                timestamp=now,
-                mode=BatteryMode.SELF_CONSUMPTION,
-                power_kw=0.0,
-                reason="credit window closed",
-            )
-        )
+        await self.controller.release(now=now, reason="credit window closed")
         tel = self.last_telemetry
         monitor = self.monitor
         secured = monitor.credit_secured if monitor else False
@@ -583,10 +624,7 @@ class FreeChargeRunner:
                 self.controller.observe_soc(tel.soc_pct)
 
             if tel.soc_pct >= target_soc:
-                await self.controller.apply(
-                    ControlCommand(timestamp=now, mode=BatteryMode.SELF_CONSUMPTION,
-                                   power_kw=0.0, reason=f"reached {target_soc:.0f}% SOC")
-                )
+                await self.controller.release(now=now, reason=f"reached {target_soc:.0f}% SOC")
                 log.info("free charge complete at %s (%.1f%%)", now.strftime("%H:%M"), tel.soc_pct)
                 break
 
@@ -602,10 +640,7 @@ class FreeChargeRunner:
             await self.clock.sleep(interval)
 
         final = await self.telemetry.read(self.clock.now())
-        await self.controller.apply(
-            ControlCommand(timestamp=self.clock.now(), mode=BatteryMode.SELF_CONSUMPTION,
-                           power_kw=0.0, reason="free charge window closed")
-        )
+        await self.controller.release(now=self.clock.now(), reason="free charge window closed")
         added = final.battery_energy_kwh - (start_energy or final.battery_energy_kwh)
         log.info("free charge window added %.2f kWh at $0.00/kWh", added)
         return added
