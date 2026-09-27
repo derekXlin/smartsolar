@@ -340,8 +340,11 @@ ramp rate, BMS floor. It is not a mock of the control logic.
 - Built and tested against **one** site: a FoxESS H3-10.0-Smart with a 47 kWh pack
   in NSW on ZEROHERO. Other plans and inverters are supported by design, not
   by evidence.
-- `modbus` and `solcast` providers are unimplemented. A local Modbus path would
-  remove the FoxESS cloud's 1440-calls/day ceiling entirely.
+- Local Modbus telemetry (`data_providers/foxess_modbus.py`) replaces the cloud's
+  ~5-minute snapshot with seconds-old readings, behind a failover to the cloud.
+  It is verified against a fake server only until `zerohero modbus-probe` passes on
+  the real inverter. Writes still go through the cloud scheduler.
+- `solcast` is unimplemented.
 - `tesla_fleet` is a documented skeleton that raises clearly rather than pretending.
 - The Super Export cap of 15 kWh is an assumption. The bill line reads "Step 1",
   implying further steps at other rates, and the reference site never approached the

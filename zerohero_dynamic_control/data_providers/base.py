@@ -50,6 +50,83 @@ class ForecastProvider(abc.ABC):
         return None
 
 
+class FailoverTelemetryProvider(TelemetryProvider):
+    """Read the primary source; fall back to a slower one while it is down.
+
+    Built for local Modbus in front of the FoxESS cloud. The two differ in cost:
+    a Modbus read is free, a cloud read spends one of 1440 daily calls. At a
+    10 s control interval, falling through to the cloud on every tick would burn
+    the quota in four hours, so fallback reads are spaced at least
+    ``fallback_min_interval`` apart and the last one is reused in between. That
+    reuse is no worse than the cloud already is: its feed only refreshes every
+    few minutes.
+
+    A dead primary is retried every ``primary_retry_seconds`` rather than every
+    tick, so a Modbus server that has vanished does not add a connect timeout to
+    every iteration of the control loop.
+    """
+
+    def __init__(
+        self,
+        primary: TelemetryProvider,
+        fallback: TelemetryProvider,
+        *,
+        fallback_min_interval: float = 60.0,
+        primary_retry_seconds: float = 30.0,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.fallback_min_interval = fallback_min_interval
+        self.primary_retry_seconds = primary_retry_seconds
+        self.name = f"failover({primary.name}->{fallback.name})"
+        self.source = primary.name
+        self._primary_down_since: datetime | None = None
+        self._last_primary_attempt: datetime | None = None
+        self._last_fallback: Telemetry | None = None
+        self._last_fallback_at: datetime | None = None
+
+    async def read(self, now: datetime) -> Telemetry:
+        retry_due = (
+            self._primary_down_since is None
+            or self._last_primary_attempt is None
+            or (now - self._last_primary_attempt).total_seconds() >= self.primary_retry_seconds
+        )
+        if retry_due:
+            self._last_primary_attempt = now
+            try:
+                reading = await self.primary.read(now)
+            except Exception as exc:  # noqa: BLE001 - any primary failure means "use the fallback"
+                if self._primary_down_since is None:
+                    self._primary_down_since = now
+                    log.warning("%s telemetry failed (%s) — falling back to %s",
+                                self.primary.name, exc, self.fallback.name)
+            else:
+                if self._primary_down_since is not None:
+                    log.warning("%s telemetry recovered after %.0f s on %s", self.primary.name,
+                                (now - self._primary_down_since).total_seconds(), self.fallback.name)
+                self._primary_down_since = None
+                self.source = self.primary.name
+                return reading
+
+        self.source = self.fallback.name
+        if (
+            self._last_fallback is not None
+            and self._last_fallback_at is not None
+            and (now - self._last_fallback_at).total_seconds() < self.fallback_min_interval
+        ):
+            return self._last_fallback.model_copy(update={"timestamp": now})
+        reading = await self.fallback.read(now)
+        self._last_fallback, self._last_fallback_at = reading, now
+        return reading
+
+    async def aclose(self) -> None:
+        for provider in (self.primary, self.fallback):
+            try:
+                await provider.aclose()
+            except Exception:  # noqa: BLE001
+                log.debug("error closing %s", provider.name, exc_info=True)
+
+
 class CachingTelemetryProvider(TelemetryProvider):
     """Wraps a provider so a transient API failure yields the last good reading.
 

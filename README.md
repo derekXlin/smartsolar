@@ -360,7 +360,7 @@ control automatically**, so a limited controller degrades in quality rather than
 | `printing` | **working** (default) | Prints actions; runnable out of the box |
 | `homeassistant` | **working** | Map a mode `select` and a power `number` in config |
 | `tesla_fleet` | documented skeleton | No continuous power setpoint; steer depth via `backup_reserve_percent` |
-| `modbus` | not started | A local FoxESS Modbus path would avoid the 1440/day cloud quota entirely |
+| `modbus` | telemetry only | Local FoxESS H3 Smart reads over Modbus TCP (`providers.foxess.modbus`), cloud as fallback; verify with `zerohero modbus-probe`. Control still goes through the cloud scheduler |
 
 Every command passes through `SafetyWrapper`, which clamps to the inverter limit and
 blocks discharge below the hard SOC floor regardless of what the loop asks for.
@@ -591,8 +591,11 @@ Coverage worth knowing about:
 - The FoxESS integration is written and unit-tested against a fake transport, but has
   **not yet been run against the real cloud API** — `zerohero foxess-discover` is the
   first thing to try, and it costs 2 of the 1440 daily calls.
-- `modbus` and `solcast` are unimplemented. A local FoxESS Modbus provider would remove
-  the cloud quota constraint entirely and is the natural next step.
+- Local Modbus **telemetry** exists (`providers.foxess.modbus`) but has been tested only
+  against a fake server built from the foxess_modbus H3 Smart register map, not yet
+  against the real inverter. `zerohero modbus-probe` checks it live before you enable it.
+  Control still goes through the cloud scheduler, whose own write latency is unmeasured.
+- `solcast` is unimplemented.
 - **Confirm the Super Export cap.** The invoice line reads "Super Export top up – **Step
   1**", which implies further steps at other rates. 15 kWh is an assumption; the billing
   data available here covers 126.06 kWh over 28 days (4.50 kWh/day), never approaching

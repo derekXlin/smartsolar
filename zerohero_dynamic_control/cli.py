@@ -410,6 +410,133 @@ def foxess_discover(
         )
 
 
+@app.command("modbus-probe")
+def modbus_probe(
+    config: Path | None = ConfigOpt,
+    host: str | None = typer.Option(None, "--host", help="Overrides providers.foxess.modbus.host"),
+    port: int | None = typer.Option(None, "--port"),
+    unit_id: int | None = typer.Option(None, "--unit-id"),
+    samples: int = typer.Option(3, help="Modbus reads to take, to show the values are live"),
+    interval: float = typer.Option(5.0, help="Seconds between Modbus reads"),
+    cloud: bool = typer.Option(True, help="Also read the cloud once to compare (1 API call)"),
+) -> None:
+    """Read the inverter over local Modbus and check it before trusting it.
+
+    Two checks. The power balance (solar + battery + grid ~= load) catches a
+    wrong sign or scale on its own, because it only uses the local reading. The
+    cloud comparison catches a wrong SOC or battery-energy register; its power
+    figures can be minutes old, so they are shown but not judged.
+    """
+    from datetime import datetime
+
+    from .data_providers.foxess_modbus import FoxESSModbusTelemetryProvider
+    from .modbus_tcp import ModbusError, ModbusTcpClient
+
+    cfg = _load(config, "WARNING")
+    mb = cfg.providers.foxess.modbus
+    target = host or mb.host
+    if not target:
+        raise typer.BadParameter("no host. Pass --host or set providers.foxess.modbus.host")
+    client = ModbusTcpClient(target, port or mb.port, unit_id=mb.unit_id if unit_id is None else unit_id,
+                             timeout=mb.timeout_seconds)
+    provider = FoxESSModbusTelemetryProvider(cfg, client)
+
+    async def _modbus() -> list:
+        readings = []
+        try:
+            for i in range(samples):
+                if i:
+                    await asyncio.sleep(interval)
+                raw = await provider.read_raw()
+                readings.append((raw, provider.to_telemetry(raw, datetime.now(cfg.site.tz))))
+        finally:
+            await provider.aclose()
+        return readings
+
+    try:
+        readings = asyncio.run(_modbus())
+    except ModbusError as exc:
+        console.print(f"[bold red]Modbus failed:[/] {exc}")
+        console.print(
+            "[dim]Connection refused or timed out usually means port 502 is closed: the "
+            "H3 Smart's built-in logger only serves Modbus on recent firmware (ask FoxESS "
+            "support for a remote update), or the IP is not the logger's. An exception "
+            "reply means the server answered but not with this register map.[/]"
+        )
+        raise typer.Exit(1) from exc
+
+    t = Table(title=f"Modbus {target}", header_style="bold")
+    for col in ("read", "SOC %", "energy kWh", "solar kW", "load kW", "battery kW", "grid kW", "balance kW"):
+        t.add_column(col, justify="right")
+    worst = 0.0
+    for i, (_raw, tel) in enumerate(readings, start=1):
+        # Hybrid inverter: PV and battery feed the AC side, the grid tops up the rest.
+        balance = tel.solar_kw + tel.battery_kw + tel.grid_kw - tel.load_kw
+        allowed = 0.5 + 0.08 * (tel.solar_kw + abs(tel.battery_kw))
+        worst = max(worst, abs(balance) - allowed)
+        t.add_row(str(i), f"{tel.soc_pct:.0f}", f"{tel.battery_energy_kwh:.2f}", f"{tel.solar_kw:.2f}",
+                  f"{tel.load_kw:.2f}", f"{tel.battery_kw:+.2f}", f"{tel.grid_kw:+.2f}",
+                  f"[{'green' if abs(balance) <= allowed else 'red'}]{balance:+.2f}[/]")
+    console.print(t)
+    raw = readings[-1][0]
+    console.print("[dim]raw: " + ", ".join(f"{k}={v:g}" for k, v in raw.items()) + "[/]")
+    console.print("[dim]battery + = discharging, grid + = importing[/]")
+
+    problems = []
+    if worst > 0:
+        problems.append("power does not balance: a sign or scale is wrong, so do NOT enable this yet")
+
+    if cloud:
+        from .data_providers import build_telemetry_provider
+        from .data_providers.base import ProviderError
+        from .data_providers.foxess import FoxESSTelemetryProvider
+
+        cfg.providers.foxess.modbus.enabled = False
+        try:
+            cloud_provider = build_telemetry_provider(cfg)
+            if not isinstance(cloud_provider, FoxESSTelemetryProvider):
+                raise ProviderError("providers.battery is not foxess")
+
+            async def _cloud():
+                try:
+                    return await cloud_provider.read(datetime.now(cfg.site.tz))
+                finally:
+                    await cloud_provider.aclose()
+
+            c = asyncio.run(_cloud())
+        except ProviderError as exc:
+            console.print(f"[yellow]cloud comparison skipped: {exc}[/]")
+        else:
+            m = readings[-1][1]
+            ct = Table(title="Modbus vs cloud (cloud power can be ~5 min old)", header_style="bold")
+            for col in ("", "modbus", "cloud", "diff"):
+                ct.add_column(col, justify="right")
+            for label, a, b, tol in (
+                ("SOC %", m.soc_pct, c.soc_pct, 2.0),
+                ("energy kWh", m.battery_energy_kwh, c.battery_energy_kwh, 1.5),
+                ("solar kW", m.solar_kw, c.solar_kw, None),
+                ("load kW", m.load_kw, c.load_kw, None),
+                ("battery kW", m.battery_kw, c.battery_kw, None),
+                ("grid kW", m.grid_kw, c.grid_kw, None),
+            ):
+                bad = tol is not None and abs(a - b) > tol
+                if bad:
+                    problems.append(f"{label} disagrees with the cloud by {a - b:+.2f}")
+                ct.add_row(label, f"{a:.2f}", f"{b:.2f}", f"[{'red' if bad else 'dim'}]{a - b:+.2f}[/]")
+            console.print(ct)
+
+    if problems:
+        for p in problems:
+            console.print(f"[bold red]✗[/] {p}")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]✓ Modbus readings are consistent.[/] To use them, set in config.yaml:\n"
+        f"  providers:\n    foxess:\n      modbus:\n        enabled: true\n        host: {target}\n"
+        f"  strategy:\n    control_interval_seconds: 10\n"
+        f"  controller:\n    min_lower_interval_seconds: 30"
+    )
+
+
 def _build_scheduler(cfg: AppConfig):
     from .data_providers.simulated import SimulatedSite
     from .scheduler import ZeroHeroScheduler

@@ -402,3 +402,60 @@ async def test_partial_close_out_does_not_claim_the_credit(tmp_path):
     ledger.record_outcome(early.model_copy(update={"partial": False, "exported_kwh": 1.0}))
     rows = ledger.read_outcomes()
     assert len(rows) == 1 and rows[0].exported_kwh == 1.0
+
+
+# ------------------------------------------------------- write pacing
+class LoadScript(TelemetryProvider):
+    """Returns whatever house load the test sets, with the battery covering it."""
+
+    name = "script"
+
+    def __init__(self):
+        self.load_kw = 2.0
+
+    async def read(self, now):
+        return Telemetry(timestamp=now, soc_pct=60.0, battery_energy_kwh=soc_to_energy(60.0, 47.0),
+                         load_kw=self.load_kw, battery_kw=self.load_kw, grid_kw=0.0)
+
+
+@pytest.mark.asyncio
+async def test_raises_go_out_at_once_and_lowers_wait():
+    """With 10 s local telemetry every flicker of load is visible. Raising answers
+    import and cannot wait; lowering only trims export, so it is paced to save
+    cloud writes."""
+    cfg = AppConfig()
+    cfg.controller.min_lower_interval_seconds = 30
+    t0 = datetime(2026, 9, 28, 18, 30, tzinfo=TZ)
+    site = LoadScript()
+    runner = build_runner(cfg, site, BoomForecast(), t0)
+
+    await runner.tick(t0)
+    first = runner.controller.last_command.power_kw
+
+    site.load_kw = 1.0
+    await runner.tick(t0 + timedelta(seconds=10))
+    assert runner.controller.last_command.power_kw == first, "lower held back inside 30 s"
+
+    site.load_kw = 4.0
+    await runner.tick(t0 + timedelta(seconds=20))
+    assert runner.controller.last_command.power_kw > first, "a raise is never held back"
+    raised = runner.controller.last_command.power_kw
+
+    site.load_kw = 1.0
+    await runner.tick(t0 + timedelta(seconds=30))
+    assert runner.controller.last_command.power_kw == raised
+    await runner.tick(t0 + timedelta(seconds=55))
+    assert runner.controller.last_command.power_kw < raised, "lowered once the interval passed"
+
+
+@pytest.mark.asyncio
+async def test_no_pacing_by_default():
+    cfg = AppConfig()
+    t0 = datetime(2026, 9, 28, 18, 30, tzinfo=TZ)
+    site = LoadScript()
+    runner = build_runner(cfg, site, BoomForecast(), t0)
+    await runner.tick(t0)
+    first = runner.controller.last_command.power_kw
+    site.load_kw = 1.0
+    await runner.tick(t0 + timedelta(seconds=60))
+    assert runner.controller.last_command.power_kw < first

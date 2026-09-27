@@ -231,6 +231,25 @@ providers:
     # batChargePower/batDischargePower pair. Flip if charge/discharge look swapped.
     invert_battery_power_sign: false
 
+    # LOCAL telemetry over Modbus TCP. The cloud feed above is a ~5-minute
+    # snapshot; 30 Wh an hour is one minute of a kettle, so a stale picture of
+    # the house cannot protect the credit. This reads the same values seconds
+    # old, and costs no cloud calls. The cloud stays as the fallback.
+    #
+    # The H3 Smart's built-in logger serves Modbus on port 502, unit 247, on
+    # recent firmware; an RS485-to-TCP adapter on the COM port works too. Find
+    # the logger's IP, give it a DHCP reservation, then CHECK IT FIRST:
+    #     zerohero modbus-probe --host <ip>
+    # and only enable it once the probe passes.
+    modbus:
+      enabled: false
+      host: null
+      port: 502
+      unit_id: 247
+      timeout_seconds: 3.0
+      # While Modbus is down, read the cloud at most this often.
+      cloud_fallback_interval_seconds: 60
+
 controller:
   # printing | foxess | homeassistant | tesla_fleet | modbus
   #
@@ -243,6 +262,9 @@ controller:
   # so this deadband is doing real work. Raise it to 0.3 if you see the
   # budget guard firing in the logs.
   command_deadband_kw: 0.15
+  # With Modbus telemetry and a 10 s control interval, pace LOWER setpoints to
+  # one write per 30 s. Raises (answering import) always go out at once.
+  min_lower_interval_seconds: 0
   options: {}
   # --- Home Assistant example -------------------------------------------
   # type: homeassistant

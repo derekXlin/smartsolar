@@ -259,6 +259,8 @@ class ZeroHeroScheduler:
             "note": runner.status_note if runner else "idle",
             "setpoint_kw": round(runner.last_setpoint_kw, 3) if runner else 0.0,
             "degraded": runner.degraded if runner else False,
+            # "foxess-modbus" or, while Modbus is down, "foxess" (the cloud).
+            "telemetry_source": getattr(self.telemetry.inner, "source", self.telemetry.inner.name),
             "decision": runner.decision.model_dump(mode="json", exclude={"slots"}) if runner and runner.decision else None,
             "telemetry": runner.last_telemetry.model_dump(mode="json") if runner and runner.last_telemetry else None,
             "free_window": (

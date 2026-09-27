@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..config import AppConfig
 from .base import (
     CachingTelemetryProvider,
+    FailoverTelemetryProvider,
     ForecastProvider,
     ProviderError,
     TelemetryProvider,
@@ -16,8 +17,10 @@ __all__ = [
     "ForecastProvider",
     "ProviderError",
     "CachingTelemetryProvider",
+    "FailoverTelemetryProvider",
     "StaticForecastProvider",
     "build_forecast_provider",
+    "build_modbus_telemetry_provider",
     "build_telemetry_provider",
 ]
 
@@ -40,12 +43,30 @@ def build_telemetry_provider(cfg: AppConfig) -> TelemetryProvider:
             timezone=cfg.site.timezone,
             budget=CallBudget(daily_limit=fox.daily_call_limit, reserve=fox.call_reserve),
         )
-        return FoxESSTelemetryProvider(cfg, client, fox.serial_number)
+        cloud = FoxESSTelemetryProvider(cfg, client, fox.serial_number)
+        if not fox.modbus.enabled:
+            return cloud
+        return FailoverTelemetryProvider(
+            build_modbus_telemetry_provider(cfg),
+            cloud,
+            fallback_min_interval=fox.modbus.cloud_fallback_interval_seconds,
+        )
 
     raise ProviderError(
         f"providers.battery={cfg.providers.battery!r} has no live implementation; "
         "use 'foxess', or 'simulated' for the synthetic site"
     )
+
+
+def build_modbus_telemetry_provider(cfg: AppConfig) -> TelemetryProvider:
+    from ..modbus_tcp import ModbusTcpClient
+    from .foxess_modbus import FoxESSModbusTelemetryProvider
+
+    mb = cfg.providers.foxess.modbus
+    if not mb.host:
+        raise ProviderError("providers.foxess.modbus.host is required for Modbus telemetry")
+    client = ModbusTcpClient(mb.host, mb.port, unit_id=mb.unit_id, timeout=mb.timeout_seconds)
+    return FoxESSModbusTelemetryProvider(cfg, client)
 
 
 def build_forecast_provider(cfg: AppConfig) -> ForecastProvider:

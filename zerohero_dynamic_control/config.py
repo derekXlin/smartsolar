@@ -314,6 +314,35 @@ class ForecastConfig(BaseModel):
         return _from_env(v, "forecast.solcast_api_key")
 
 
+class FoxESSModbusConfig(BaseModel):
+    """Local Modbus TCP telemetry, read straight from the inverter.
+
+    The cloud feed is a five-minute snapshot; this is seconds old, which is what
+    it takes to see a kettle before it spends the hour's 30 Wh. When enabled it
+    becomes the primary telemetry source and the cloud becomes the fallback.
+
+    Run `zerohero modbus-probe` first: it reads both sources side by side.
+    """
+
+    enabled: bool = False
+    host: str | None = None
+    """IP of the inverter's built-in WL-H3-G2 logger, or of an RS485-to-TCP adapter
+    wired to its COM port. Give it a DHCP reservation so it cannot move."""
+    port: int = Field(502, gt=0, lt=65536)
+    unit_id: int = Field(247, ge=0, le=255)
+    """247 for FoxESS, over both the built-in logger and RS485."""
+    timeout_seconds: float = Field(3.0, gt=0)
+    cloud_fallback_interval_seconds: float = Field(60.0, ge=10)
+    """While Modbus is down, read the cloud at most this often. Each read is one
+    of the 1440 daily calls."""
+
+    @model_validator(mode="after")
+    def _host_when_enabled(self) -> FoxESSModbusConfig:
+        if self.enabled and not self.host:
+            raise ValueError("providers.foxess.modbus.enabled needs providers.foxess.modbus.host")
+        return self
+
+
 class FoxESSConfig(BaseModel):
     """FoxESS Cloud OpenAPI settings.
 
@@ -340,6 +369,8 @@ class FoxESSConfig(BaseModel):
     """Only used when the firmware exposes the signed invBatPower but not the
     unambiguous batChargePower/batDischargePower pair. Flip this if the simulator
     and the app disagree about whether the battery is charging."""
+
+    modbus: FoxESSModbusConfig = Field(default_factory=FoxESSModbusConfig)
 
     @field_validator("api_key", "serial_number", mode="before")
     @classmethod
@@ -392,6 +423,14 @@ class ControllerConfig(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
     command_deadband_kw: float = Field(0.15, ge=0)
     """Suppress re-issuing a setpoint that differs by less than this. Saves API calls."""
+    min_lower_interval_seconds: float = Field(0.0, ge=0)
+    """Hold a LOWER setpoint back until this long after the last write.
+
+    Raises always go out at once: they answer import, and import spends the
+    hour's 30 Wh. Lowering only trims a margin of export, so it can wait. With
+    fast local telemetry the loop sees every flicker of the load, and without
+    this each one would cost a cloud write; 30 s keeps a three-hour window
+    within a few hundred writes."""
 
 
 class LoggingConfig(BaseModel):

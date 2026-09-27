@@ -375,11 +375,18 @@ class EveningRunner:
             else BatteryMode.FORCE_EXPORT
         )
 
+        last = self.controller.last_command
         changed = (
-            self.controller.last_command is None
-            or self.controller.last_command.mode is not mode
-            or abs(self.controller.last_command.power_kw - setpoint) >= self.cfg.controller.command_deadband_kw
+            last is None
+            or last.mode is not mode
+            or abs(last.power_kw - setpoint) >= self.cfg.controller.command_deadband_kw
         )
+        if (
+            changed and last is not None and last.mode is mode and setpoint < last.power_kw
+            and (now - last.timestamp).total_seconds() < self.cfg.controller.min_lower_interval_seconds
+        ):
+            # Asymmetric pacing: see ControllerConfig.min_lower_interval_seconds.
+            changed = False
         if changed:
             await self.controller.apply(
                 ControlCommand(timestamp=now, mode=mode, power_kw=setpoint, reason=reason)
