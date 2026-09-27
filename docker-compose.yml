@@ -1,0 +1,69 @@
+# THIS IS THE ONE TO USE when the repo and Docker are on the same machine
+# (a NAS hosting both). It builds the image from this source tree:
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#   curl http://localhost:8787/status
+#
+# Updating later:  git pull && docker compose up -d --build
+#
+# docker-compose.registry.yml is the alternative, and only applies if you publish
+# the image to a registry and pull it from elsewhere.
+
+services:
+  zerohero:
+    build: .
+    image: zerohero-dynamic-control:1.0.0
+    container_name: zerohero
+
+    # Restore the inverter and restart after a NAS reboot or a crash. "no" would
+    # leave the battery in whatever mode it was in when the container died.
+    restart: unless-stopped
+
+    environment:
+      # The FoxESS key. Put it in a .env file next to this compose file; it is
+      # never baked into the image. See .env.example.
+      FOXESS_API_KEY: ${FOXESS_API_KEY:?set FOXESS_API_KEY in .env}
+      TZ: Australia/Sydney
+      ZEROHERO_API_HOST: 0.0.0.0
+
+    ports:
+      # Bind to the NAS LAN address only. There is a manual-override endpoint
+      # behind this and no authentication, so do NOT port-forward it to the
+      # internet — reach it over Tailscale/WireGuard if you need it remotely.
+      - "8787:8787"
+
+    volumes:
+      # Read-only config: the container must never rewrite your tariff or limits.
+      - ./config.yaml:/app/config.yaml:ro
+      # Persistent ledger, decisions and samples. This is the data that tells you
+      # whether the $1 was secured each day, so it must outlive the container.
+      - ./var:/app/var
+
+    # Match your NAS user so the bind-mounted ./var stays writable.
+    # Synology often starts users at 1026; check with `id` over SSH.
+    # user: "1026:100"
+
+    # Docker's default grace period is 10 s. The shutdown path makes one or two
+    # API calls to restore the inverter schedule; 30 s is generous insurance
+    # against a slow FoxESS cloud response at exactly the wrong moment.
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8787/status", timeout=8).status == 200 else 1)
+      interval: 60s
+      timeout: 10s
+      start_period: 20s
+      retries: 3

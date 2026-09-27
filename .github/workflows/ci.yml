@@ -1,0 +1,21 @@
+# Run the test suite on every push. The tariff test pins the engine's dollar
+# figures to a real invoice, so a green run means the economics still add up.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev,forecast,api]'
+      - run: ruff check zerohero_dynamic_control tests
+      - run: pytest -q

@@ -1,0 +1,271 @@
+# ============================================================================
+# ZEROHERO dynamic control — example configuration
+# ============================================================================
+# Tariff rates come from GloBird tax the reference invoice (15-Jul-2026 to
+# 11-Aug-2026) and are GST-inclusive. The strategy is an arbitrage, so it is
+# only as good as these numbers — re-check whenever your plan changes.
+#
+# WINDOW OWNERSHIP
+#   11:00-14:00  free charging  -> owned by YOUR FoxESS app ForceCharge group.
+#                                  We only VERIFY it (strategy.free_window_assurance).
+#   18:00-21:00  credit window  -> owned by this controller. Its scheduler group
+#                                  is MERGED alongside yours, never replacing it.
+#
+# TWO THINGS STILL NEED YOUR INPUT — both marked ACTION below:
+#   1. forecast.pv_rating_kw          your actual array size (currently estimated)
+#   2. inverter.grid_export_limit_kw  your Ausgrid export approval (5 or 10 kW)
+
+site:
+  # ACTION: your own site. Coordinates are used ONLY to compute sunset, and 1
+  # decimal place (~11 km) is ample — it moves sunset by under 10 seconds. Do
+  # not commit a precise fix on your house. The values below are the Sydney CBD.
+  name: My Home
+  latitude: -33.8
+  longitude: 151.2
+  timezone: Australia/Sydney
+  postcode: ""
+  network: Ausgrid
+
+battery:
+  usable_capacity_kwh: 47.0
+  max_discharge_kw: 10.0
+  max_charge_kw: 10.0
+
+  # Planning reserve: the engine will not *plan* to go below this.
+  min_reserve_soc_pct: 25.0
+  # Hard floor. The loop may dip below the planning reserve to protect the $1
+  # credit, but never below this.
+  emergency_floor_soc_pct: 10.0
+  allow_reserve_breach_for_credit: true
+
+  discharge_efficiency: 0.95
+  charge_efficiency: 0.95
+  ramp_kw_per_minute: 30.0
+
+inverter:
+  ac_limit_kw: 10.0
+  # TRUE for a hybrid inverter: PV and battery share one AC port, so solar
+  # COMPETES with battery export for the 10 kW rather than adding to it.
+  # Set false only if your PV is on a separate AC-coupled inverter.
+  solar_shares_ac_limit: true
+  # ACTION: set to your actual Ausgrid export approval. Many NSW connections are
+  # limited to 5 kW. It matters: filling the 15 kWh Super Export cap needs 5 kW
+  # sustained for the full three hours, so at a 5 kW approval you reach the cap
+  # with no slack; at 10 kW you can recover from a cloudy patch. Too high risks
+  # export limitation tripping or breaching your connection agreement.
+  grid_export_limit_kw: 10.0
+
+plan:
+  free_charge_start: "11:00"
+  free_charge_end: "14:00"
+  credit_window_start: "18:00"
+  credit_window_end: "21:00"
+  import_limit_kwh_per_hour: 0.03
+  joined_before_july_2026: true
+
+  tariff:
+    daily_supply_charge_aud: 1.584
+    import_periods:
+      - {name: offpeak,         start: "11:00", end: "14:00", rate_aud_per_kwh: 0.000}
+      - {name: shoulder_pm,     start: "14:00", end: "16:00", rate_aud_per_kwh: 0.407}
+      - {name: peak,            start: "16:00", end: "23:00", rate_aud_per_kwh: 0.528}
+      - {name: shoulder_night,  start: "23:00", end: "11:00", rate_aud_per_kwh: 0.407}
+    export_periods:
+      - {name: fit_evening,     start: "16:00", end: "23:00", rate_aud_per_kwh: 0.020}
+      - {name: fit_day,         start: "23:00", end: "16:00", rate_aud_per_kwh: 0.000}
+    super_export_cap_kwh: 15.0
+    super_export_topup_aud_per_kwh: 0.080
+    zerohero_credit_aud: 1.00
+
+strategy:
+  # economic            compare what a stored kWh is worth (the $0.407-$0.528 import
+  #                     it displaces) against the $0.10 it earns exported, and sell
+  #                     only what tomorrow's free window would strand.  <-- default
+  # guarantee_credit_only  discharge only enough to hold import at zero
+  # retain_overnight       keep enough to reach the next free window, sell the rest
+  # maximise_export        sell everything above the planning reserve
+  objective: economic
+
+  # constant | front_loaded | solar_following
+  allocation: front_loaded
+
+  slot_minutes: 5
+  control_interval_seconds: 60
+  replan_minutes: 15
+  decision_lead_minutes: 10
+
+  # Deliberate over-discharge so the meter sees a trickle of export rather than
+  # hovering at exactly zero. Costs ~0.75 kWh across the window; insures $1.
+  import_safety_margin_kw: 0.25
+  # Extra energy held back beyond the forecast need, to absorb load surprises.
+  energy_safety_buffer_kwh: 1.5
+
+  limit_to_super_export_cap: true
+  abandon_credit_if_unwinnable: true
+  unwinnable_margin_kwh: 0.5
+
+  # 0 = compute the hours from window close to the next free-charge window.
+  overnight_hours: 0
+  # TUNE THESE TWO from your own interval data — they drive how much gets sold.
+  # Higher overnight load or lower morning solar => keep more, export less.
+  # Calibrated from your own data: the FoxESS plant report shows ~39 kWh/day of
+  # house consumption (1057.7 kWh over 27 days in September) = 1.63 kW average,
+  # and the invoice shows only 1.98 kWh/day of PAID import, so the battery is
+  # already carrying nearly all of the overnight load.
+  overnight_load_kw: 1.4
+  # Fallback only: with forecast.provider=open_meteo this is estimated from the
+  # real morning forecast each day, which matters because it swings from ~2 kWh
+  # in midwinter to ~15 kWh in midsummer.
+  morning_solar_to_battery_kwh: 4.0
+
+  revert_mode_on_target_reached: false
+  # FALSE: your FoxESS app already has a ForceCharge group for 11:00-14:00, so
+  # this controller does not drive that window. Two things writing the same
+  # scheduler is a good way to produce surprises.
+  charge_in_free_window: false
+  free_window_target_soc_pct: 100.0
+
+  # Instead we VERIFY the window. It is the most valuable three hours of the day
+  # (~30 kWh at $0.00 that would otherwise cost $0.407-$0.528) and it fails
+  # silently — the battery just quietly arrives at 18:00 half full.
+  free_window_assurance:
+    enabled: true
+
+    # Read the FoxESS scheduler this many minutes before 11:00 and confirm an
+    # ENABLED ForceCharge group actually covers the window. Catches a deleted
+    # group, a cleared enable flag, or times edited in the app.
+    audit_lead_minutes: 10
+
+    # Behaviour polling during the window. 600 s = 18 calls; with the 1 audit
+    # call that is 19 of the 1440 daily budget.
+    check_interval_seconds: 600
+
+    # Below this the battery counts as idle rather than charging.
+    min_charge_power_kw: 0.5
+
+    target_soc_pct: 100.0
+    # Flag the window as a problem if SOC at 14:00 is under this.
+    alert_soc_pct: 95.0
+
+    # If the battery is found idle with free energy available, should WE command
+    # ForceCharge? Off by default so the FoxESS app stays the single owner of
+    # this window. Turn on once the audit has been clean for a week or two.
+    remediate: false
+
+  # Blind "force export at X kW until 21:00" used when telemetry dies entirely.
+  fallback_discharge_kw: 3.0
+
+forecast:
+  # open_meteo is free and needs no key; it falls back to the built-in clear-sky
+  # model automatically if the request fails.  pip install -e '.[forecast]'
+  provider: open_meteo      # static | open_meteo | solcast
+
+  # ACTION: verify your array size. 6.6 kW is ESTIMATED, not measured: your
+  # September plant report shows 731.4 kWh over 27 days = 27.1 kWh/day, and
+  # Sydney in September yields roughly 4.0 kWh per kWp per day => ~6.8 kW. The
+  # yearly figure in that same export contradicts itself (3.22 MWh header vs
+  # all-zero daily rows), so correct this from your inverter nameplate.
+  pv_rating_kw: 6.6
+  # solcast_api_key: ${SOLCAST_API_KEY}
+  # solcast_resource_id: your-resource-id
+  timeout_seconds: 10.0
+  static_residual_solar_kwh: 1.0
+  static_evening_load_kw: 1.7
+
+  # Hour-of-day house load in kW, used when no load forecast is available.
+  # Shaped around a 1.63 kW daily average (~39 kWh/day) with an evening hump.
+  # This is the input the MANDATORY discharge is computed from, so errors here
+  # are the main risk to the $1 — refine from your own interval data.
+  load_profile_kw:
+    "16": 1.8
+    "17": 2.2
+    "18": 2.7
+    "19": 2.9
+    "20": 2.4
+    "21": 1.9
+    "22": 1.6
+
+providers:
+  # simulated | foxess | http | homeassistant
+  # All three come from the ONE FoxESS real/query call — SoC, PV, load and grid
+  # arrive together, which is what keeps a 3-hour window at 180 API calls.
+  battery: foxess
+  solar: foxess
+  load: foxess
+
+  foxess:
+    # Generated in FoxESS Cloud -> User Profile -> API Management.
+    # Read from the environment so the key never lives in a file that could be
+    # committed or shared:   export FOXESS_API_KEY=...    (see .env)
+    api_key: ${FOXESS_API_KEY}
+    # Your inverter's serial. Kept out of the file so the repo can be shared:
+    # `zerohero foxess-discover` prints it, then set FOXESS_SERIAL in the
+    # environment alongside FOXESS_API_KEY.
+    serial_number: ${FOXESS_SERIAL}
+    base_url: https://www.foxesscloud.com
+
+    # FoxESS allows 1440 interface calls per DAY per inverter. Our spend:
+    #   free-window assurance   1 audit + 18 checks  =  19
+    #   credit window 18-21 @60s  180 reads + ~40 writes = 220
+    #   ------------------------------------------------------
+    #   total                                        ~240 of 1440
+    # The client tracks spend and refuses routine calls once only `call_reserve`
+    # remain, so close-out and schedule restore can ALWAYS run.
+    daily_call_limit: 1440
+    call_reserve: 120
+
+    # scheduler/enable replaces the ENTIRE group list, so leave this true. We
+    # read your existing groups at startup and MERGE ours alongside them, which
+    # means your 11:00-14:00 ForceCharge survives even if our close-out never
+    # runs. The baseline is also restored at 21:00 as a tidy-up.
+    preserve_existing_schedule: true
+
+    # Only used if your firmware exposes signed invBatPower but not the
+    # batChargePower/batDischargePower pair. Flip if charge/discharge look swapped.
+    invert_battery_power_sign: false
+
+controller:
+  # printing | foxess | homeassistant | tesla_fleet | modbus
+  #
+  # You have set this to `foxess`, which WILL write to the inverter.
+  # Consider `printing` for the first few evenings: with providers.battery=foxess
+  # you still get real telemetry and a real schedule audit, but zero writes —
+  # every command is logged instead. Check `zerohero ledger`, then switch back.
+  type: foxess
+  # Every setpoint change is one FoxESS write against the 1440/day budget,
+  # so this deadband is doing real work. Raise it to 0.3 if you see the
+  # budget guard firing in the logs.
+  command_deadband_kw: 0.15
+  options: {}
+  # --- Home Assistant example -------------------------------------------
+  # type: homeassistant
+  # options:
+  #   base_url: http://homeassistant.local:8123
+  #   token: ${HA_TOKEN}
+  #   mode_entity: select.battery_operating_mode
+  #   power_entity: number.battery_discharge_power
+  #   power_entity_in_watts: true
+  #   mode_map:
+  #     self_consumption: "Self Consumption"
+  #     force_export: "Forced Discharge"
+  #     force_charge: "Forced Charge"
+  #     hold: "Stop"
+
+logging:
+  level: INFO
+  ledger_path: var/ledger.jsonl
+  decision_log_path: var/decisions.jsonl
+  samples_path: var/samples.jsonl
+  rich_tracebacks: true
+
+api:
+  enabled: false
+  host: 127.0.0.1
+  port: 8787
+
+simulation:
+  enabled: false
+  scenario: summer
+  speed: 0.0
+  start_soc_pct: 85.0
+

@@ -1,0 +1,68 @@
+# OPTIONAL — only for pulling a PREBUILT image from a registry.
+#
+# You do NOT need this if the repo and Docker live on the same machine: use
+# docker-compose.yml instead, which builds from source in place.
+#
+# Reach for this file only when you want to build once and run on several
+# machines, or want CI to run the tests on every push. It requires the repo to
+# be on GitHub so the Action can build and publish to GHCR.
+#
+#   1. On the NAS, log in to GHCR once (private image, so this is required):
+#        echo <PAT> | docker login ghcr.io -u <github-username> --password-stdin
+#      The PAT needs only the `read:packages` scope. Create it at
+#      github.com/settings/tokens -> Tokens (classic).
+#
+#   2. Put config.yaml and a .env next to this file, then:
+#        docker compose -f docker-compose.nas.yml pull
+#        docker compose -f docker-compose.nas.yml up -d
+#
+#   3. Check it:  curl http://<nas-ip>:8787/status
+#                 docker compose -f docker-compose.nas.yml logs -f
+
+services:
+  zerohero:
+    image: ghcr.io/YOUR_GITHUB_USERNAME/smartsolar:latest
+    container_name: zerohero
+    restart: unless-stopped
+    pull_policy: always
+
+    environment:
+      FOXESS_API_KEY: ${FOXESS_API_KEY:?set FOXESS_API_KEY in .env}
+      TZ: Australia/Sydney
+      ZEROHERO_API_HOST: 0.0.0.0
+
+    ports:
+      # LAN only. There is an unauthenticated manual-override endpoint behind
+      # this — do NOT port-forward it. Use Tailscale/WireGuard for remote access.
+      - "8787:8787"
+
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./var:/app/var
+
+    # Match your NAS user so ./var stays writable. Synology usually starts real
+    # users at 1026 and puts them in group 100 (users). Check over SSH with `id`.
+    # user: "1026:100"
+
+    # The shutdown path makes one or two API calls to hand the inverter back.
+    # Docker's 10 s default is enough, but 30 s covers a slow FoxESS response.
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:8787/status", timeout=8).status == 200 else 1)
+      interval: 60s
+      timeout: 10s
+      start_period: 20s
+      retries: 3

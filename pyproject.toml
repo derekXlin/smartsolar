@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerohero-dynamic-control"
+version = "1.0.0"
+description = "Dynamic battery export control for a GloBird ZEROHERO battery site (NSW, Australia)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "typer>=0.12",
+    "apscheduler>=3.10",
+]
+
+[project.optional-dependencies]
+forecast = ["httpx>=0.27"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+all = ["httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29", "pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+zerohero = "zerohero_dynamic_control.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["zerohero_dynamic_control*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+filterwarnings = ["error::RuntimeWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

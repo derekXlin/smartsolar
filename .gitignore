@@ -1,0 +1,36 @@
+# Your live configuration: site name, coordinates, tariff, inverter serial.
+# Commit config.example.yaml instead and copy it to config.yaml locally.
+config.yaml
+
+# Secrets — never commit
+.env
+# Synology needs the API key inline (its parser cannot read .env), so the
+# working copy holds a live credential. The .example template is committed.
+docker-compose.synology.yml
+!docker-compose.synology.yml.example
+.env.*
+!.env.example
+
+# Personal data — bills, plant exports. These carry your name, address, NMI,
+# account and meter numbers. Keep them off the repo even while it is private:
+# repo visibility can change, and CI logs and artifacts outlive it.
+data/
+
+# Runtime output
+var/
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
+
+# Local PII sweep: contains the identifiers it searches for
+scripts_pii_sweep.py

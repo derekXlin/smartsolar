@@ -1,0 +1,78 @@
+# Synology Container Manager / Docker package.
+#
+# Deliberately conservative: Synology's compose parser is older and stricter than
+# the docker CLI's, and rejects several things the other compose files here use.
+# Everything below is plain compose v3 syntax with no substitutions and no build
+# step, which is what that parser will accept.
+#
+# ---------------------------------------------------------------------------
+# STEP 1 — build the image once, over SSH. Container Manager Projects expect an
+# image to exist; they will not build one for you reliably.
+#
+#     ssh your-nas
+#     cd /path/to/your/repo     # or wherever you cloned it
+#     sudo docker build -t zerohero:1.0.0 .
+#
+# STEP 2 — put config.yaml in a folder the container can read, e.g.
+#     /volume1/docker/zerohero/config.yaml
+#     /volume1/docker/zerohero/var/          (create it, this holds the ledger)
+#
+# STEP 3 — Container Manager -> Project -> Create
+#     Project name: zerohero
+#     Path:         /volume1/docker/zerohero
+#     Source:       "Upload docker-compose.yml" or paste this file's contents
+#
+# STEP 4 — put your API key in the environment section below BEFORE creating the
+# project. Synology does not reliably read a .env file, so the key goes inline
+# here. That is why this file is gitignored: it will contain a live credential.
+# ---------------------------------------------------------------------------
+
+version: "3.8"
+
+services:
+  zerohero:
+    # Built in STEP 1. Never "build: ." — Container Manager rejects it.
+    image: zerohero:1.0.0
+    container_name: zerohero
+    restart: unless-stopped
+
+    environment:
+      # PASTE YOUR KEY HERE. Synology's parser does not support ${VAR} lookups
+      # from a .env file, so this must be the literal value.
+      - FOXESS_API_KEY=PASTE_YOUR_FOXESS_KEY_HERE
+      - TZ=Australia/Sydney
+      - ZEROHERO_API_HOST=0.0.0.0
+
+    ports:
+      # LAN only. /override and /mode have no authentication, so do not forward
+      # this port through your router. Use Tailscale or the Synology VPN instead.
+      - "8787:8787"
+
+    volumes:
+      # Absolute paths: Synology resolves relative paths differently from the CLI.
+      - /volume1/docker/zerohero/config.yaml:/app/config.yaml:ro
+      - /volume1/docker/zerohero/var:/app/var
+
+    # The image runs as UID 1000, but Synology numbers real users from 1026 and
+    # puts them in group 100 (users), so /app/var would not be writable. Check
+    # yours over SSH with `id`, then set it here.
+    user: "1026:100"
+
+    # The shutdown path makes one or two FoxESS calls to hand the inverter back
+    # before exiting. Synology sends SIGTERM on stop, package update and reboot.
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # Single-line CMD-SHELL form. The multi-line list form that the other compose
+    # files use is what Synology's parser trips over.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/status',timeout=8).status==200 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
