@@ -52,7 +52,13 @@ class FoxESSTelemetryProvider(TelemetryProvider):
         except FoxESSError as exc:
             raise ProviderError(f"FoxESS telemetry read failed: {exc}") from exc
         if not raw:
-            raise ProviderError("FoxESS returned no variables")
+            # Almost always a wrong serial: FoxESS answers errno 0 with an empty
+            # payload rather than an error. Name the serial so that is visible.
+            raise ProviderError(
+                f"FoxESS returned no variables for serial {self.sn!r}. "
+                f"The API accepted the request, so the serial is probably wrong — "
+                f"run `zerohero foxess-discover` to confirm it."
+            )
         return self.to_telemetry(raw, now)
 
     def to_telemetry(self, raw: dict[str, float], now: datetime) -> Telemetry:

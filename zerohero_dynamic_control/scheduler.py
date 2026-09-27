@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 from datetime import timedelta
 
+from . import __version__
 from .clock import RealClock
 from .config import AppConfig
 from .controllers import build_controller
@@ -28,7 +30,14 @@ class ZeroHeroScheduler:
     def __init__(self, cfg: AppConfig, telemetry: TelemetryProvider) -> None:
         self.cfg = cfg
         self.clock = RealClock(cfg.site.tz)
-        self.telemetry = CachingTelemetryProvider(telemetry)
+        # The fastest the pack can physically move, used to spot bad cloud data.
+        soc_rate = (
+            max(cfg.battery.max_charge_kw, cfg.battery.max_discharge_kw)
+            / cfg.battery.usable_capacity_kwh * 100.0 / 60.0
+        )
+        self.telemetry = CachingTelemetryProvider(
+            telemetry, max_soc_rate_pct_per_min=soc_rate
+        )
         self.forecast = build_forecast_provider(cfg)
         self.controller = build_controller(cfg)
         self.ledger = Ledger(
@@ -155,7 +164,9 @@ class ZeroHeroScheduler:
         self._stop = asyncio.Event()
         sched.start()
         self._install_signal_handlers()
-        log.info("running — local time %s (%s)", self.clock.now().isoformat(), self.cfg.site.timezone)
+        log.info("zerohero %s (build %s) — local time %s (%s)",
+                 __version__, os.environ.get("ZEROHERO_BUILD", "unknown"),
+                 self.clock.now().isoformat(), self.cfg.site.timezone)
         try:
             await self._stop.wait()
         except asyncio.CancelledError:
@@ -219,6 +230,8 @@ class ZeroHeroScheduler:
     def status(self) -> dict:
         runner = self.current_runner
         return {
+            "version": __version__,
+            "build": os.environ.get("ZEROHERO_BUILD", "unknown"),
             "site": self.cfg.site.name,
             "now": self.clock.now().isoformat(),
             "active": runner is not None,

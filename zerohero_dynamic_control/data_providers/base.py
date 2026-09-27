@@ -59,18 +59,78 @@ class CachingTelemetryProvider(TelemetryProvider):
     steering on numbers that no longer describe the site.
     """
 
-    def __init__(self, inner: TelemetryProvider, max_age_seconds: float = 600.0) -> None:
+    def __init__(
+        self,
+        inner: TelemetryProvider,
+        max_age_seconds: float = 600.0,
+        *,
+        max_soc_rate_pct_per_min: float | None = None,
+        max_rejects: int = 3,
+    ) -> None:
         self.inner = inner
         self.max_age_seconds = max_age_seconds
+        self.max_soc_rate_pct_per_min = max_soc_rate_pct_per_min
+        self.max_rejects = max_rejects
         self.name = f"caching({inner.name})"
         self._last: Telemetry | None = None
         self.consecutive_failures = 0
+        self.consecutive_rejects = 0
+        self.rejected_samples = 0
+
+    def _implausible(self, reading: Telemetry) -> str | None:
+        """Reject SOC jumps the hardware could not physically produce.
+
+        Observed on a real FoxESS cloud feed: two identical SOC samples 90 s
+        apart reading 9 points BELOW the true value, then a 21-point jump back
+        in six minutes. A 10 kW inverter into a 47 kWh pack can move SOC by at
+        most ~0.35 points a minute, so that jump was impossible and the low
+        readings were a stale snapshot, not a discharge.
+
+        This matters because of when it could strike. A bogus LOW reading at
+        17:50 makes the engine conclude the window is unwinnable and abandon a
+        credit it could have won; a bogus HIGH one makes it over-export and lose
+        both the credit and the charge. Neither is recoverable after the fact,
+        so a physically impossible sample is discarded in favour of the last
+        good one.
+        """
+        if self.max_soc_rate_pct_per_min is None or self._last is None:
+            return None
+        dt_min = (reading.timestamp - self._last.timestamp).total_seconds() / 60.0
+        if dt_min <= 0 or dt_min > 15:
+            # A long gap (restart, outage) legitimately allows a large change.
+            return None
+        delta = abs(reading.soc_pct - self._last.soc_pct)
+        ceiling = self.max_soc_rate_pct_per_min * dt_min * 1.5   # 50% headroom
+        if delta > ceiling:
+            return (
+                f"SOC moved {delta:.1f} points in {dt_min:.1f} min "
+                f"({self._last.soc_pct:.0f}% -> {reading.soc_pct:.0f}%); the inverter "
+                f"can manage at most {ceiling:.1f}"
+            )
+        return None
 
     async def read(self, now: datetime) -> Telemetry:
         try:
             reading = await self.inner.read(now)
-            self._last = reading
             self.consecutive_failures = 0
+
+            reason = self._implausible(reading)
+            if reason is not None and self.consecutive_rejects < self.max_rejects:
+                # Hold the last good reading, but only briefly: if the "impossible"
+                # value keeps coming back it is more likely our baseline was wrong
+                # than that the inverter is lying, so give in after max_rejects.
+                self.consecutive_rejects += 1
+                self.rejected_samples += 1
+                log.warning("rejecting implausible telemetry (%d/%d): %s",
+                            self.consecutive_rejects, self.max_rejects, reason)
+                assert self._last is not None
+                return self._last.model_copy(update={"timestamp": now, "stale": True})
+            if reason is not None:
+                log.warning("accepting previously rejected SOC after %d samples — "
+                            "treating the earlier baseline as wrong", self.consecutive_rejects)
+
+            self.consecutive_rejects = 0
+            self._last = reading
             return reading
         except Exception as exc:  # noqa: BLE001 - provider failures must never propagate
             self.consecutive_failures += 1

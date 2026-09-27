@@ -27,6 +27,15 @@ COPY pyproject.toml README.md ./
 COPY zerohero_dynamic_control ./zerohero_dynamic_control
 RUN pip install --no-cache-dir '.[forecast,api]' tzdata
 
+# Stamp the build. Rebuilding into the same tag leaves nothing to tell you which
+# code is actually running — that is how a config/code version skew went unnoticed
+# for an hour. /status and the startup log now report both of these.
+ARG ZEROHERO_BUILD=local
+ENV ZEROHERO_BUILD=${ZEROHERO_BUILD}
+LABEL org.opencontainers.image.title="zerohero-dynamic-control" \
+      org.opencontainers.image.revision="${ZEROHERO_BUILD}" \
+      org.opencontainers.image.source="https://github.com/derekXlin/smartsolar"
+
 # Run unprivileged. UID 1000 matches the first user on most NAS platforms, which
 # keeps the bind-mounted ./var writable without a chown. Override with `user:` in
 # compose if your NAS numbers users differently (Synology often starts at 1026).

@@ -11,7 +11,7 @@
 #
 #     ssh your-nas
 #     cd /path/to/your/repo     # or wherever you cloned it
-#     sudo docker build -t zerohero:1.0.0 .
+#     sudo docker build -t zerohero:1.1.0 -t zerohero:latest .
 #
 # STEP 2 — put config.yaml in a folder the container can read, e.g.
 #     /volume1/docker/zerohero/config.yaml
@@ -32,7 +32,7 @@ version: "3.8"
 services:
   zerohero:
     # Built in STEP 1. Never "build: ." — Container Manager rejects it.
-    image: zerohero:1.0.0
+    image: zerohero:1.1.0
     container_name: zerohero
     restart: unless-stopped
 
@@ -40,6 +40,9 @@ services:
       # PASTE YOUR KEY HERE. Synology's parser does not support ${VAR} lookups
       # from a .env file, so this must be the literal value.
       - FOXESS_API_KEY=PASTE_YOUR_FOXESS_KEY_HERE
+      # Required whenever config.yaml uses ${FOXESS_SERIAL}.
+      # `zerohero foxess-discover` prints your serial.
+      - FOXESS_SERIAL=PASTE_YOUR_INVERTER_SERIAL_HERE
       - TZ=Australia/Sydney
       - ZEROHERO_API_HOST=0.0.0.0
 

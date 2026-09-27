@@ -28,6 +28,10 @@ services:
 
     environment:
       FOXESS_API_KEY: ${FOXESS_API_KEY:?set FOXESS_API_KEY in .env}
+      # config.example.yaml sets serial_number: ${FOXESS_SERIAL}, so this must be
+      # passed too or the container exits at startup. Both live in .env, which is
+      # gitignored — unlike this file, which is tracked and overwritten on pull.
+      FOXESS_SERIAL: ${FOXESS_SERIAL:?set FOXESS_SERIAL in .env (zerohero foxess-discover prints it)}
       TZ: Australia/Sydney
       ZEROHERO_API_HOST: 0.0.0.0
 

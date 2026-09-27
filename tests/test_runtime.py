@@ -185,3 +185,106 @@ def test_margin_escalates_as_the_hourly_allowance_is_consumed():
     runner.monitor.observe(start, 1.5)
     runner.monitor.observe(start + timedelta(minutes=1), 1.5)
     assert runner._margin_kw(now) > clean
+
+
+# ------------------------------------------------- bad data from the vendor cloud
+class DriftingSite(TelemetryProvider):
+    """Replays a scripted SOC sequence, including a glitch."""
+
+    name = "drifting"
+
+    def __init__(self, socs):
+        self.socs = list(socs)
+        self.i = 0
+
+    async def read(self, now):
+        soc = self.socs[min(self.i, len(self.socs) - 1)]
+        self.i += 1
+        return Telemetry(
+            timestamp=now, soc_pct=soc, battery_energy_kwh=soc_to_energy(soc, 47.0),
+            solar_kw=0.0, load_kw=3.0, battery_kw=-9.9, grid_kw=12.9,
+        )
+
+
+@pytest.mark.asyncio
+async def test_impossible_soc_drop_is_rejected():
+    """Seen live on a FoxESS cloud feed: a stale snapshot reported 35% while the
+    pack was really at 44% and charging. A 10 kW inverter into 47 kWh moves SOC by
+    ~0.35 points/min, so a 9-point drop in 2 minutes cannot be real. Believing it
+    at 17:50 would abandon a winnable $1 credit."""
+    rate = 10.0 / 47.0 * 100.0 / 60.0
+    cache = CachingTelemetryProvider(DriftingSite([44.0, 35.0, 35.0, 56.0]),
+                                     max_soc_rate_pct_per_min=rate)
+    t0 = datetime(2026, 9, 27, 12, 24, tzinfo=TZ)
+    assert (await cache.read(t0)).soc_pct == 44.0
+    r1 = await cache.read(t0 + timedelta(minutes=2))
+    assert r1.soc_pct == 44.0 and r1.stale, "the impossible 35% should have been discarded"
+    assert cache.rejected_samples == 1
+
+
+@pytest.mark.asyncio
+async def test_plausible_charging_is_not_rejected():
+    """~0.35 points/min is normal at full charge and must pass untouched."""
+    rate = 10.0 / 47.0 * 100.0 / 60.0
+    cache = CachingTelemetryProvider(DriftingSite([44.0, 47.5, 51.0]),
+                                     max_soc_rate_pct_per_min=rate)
+    t0 = datetime(2026, 9, 27, 12, 24, tzinfo=TZ)
+    await cache.read(t0)
+    assert (await cache.read(t0 + timedelta(minutes=10))).soc_pct == 47.5
+    assert cache.rejected_samples == 0
+
+
+@pytest.mark.asyncio
+async def test_persistent_disagreement_eventually_wins():
+    """If the 'impossible' value keeps coming back, our baseline is the wrong one.
+    Refusing forever would leave the controller steering on a fossil."""
+    rate = 10.0 / 47.0 * 100.0 / 60.0
+    cache = CachingTelemetryProvider(DriftingSite([80.0] + [20.0] * 6),
+                                     max_soc_rate_pct_per_min=rate, max_rejects=3)
+    t = datetime(2026, 9, 27, 12, 0, tzinfo=TZ)
+    await cache.read(t)
+    for i in range(1, 5):
+        r = await cache.read(t + timedelta(minutes=i))
+    assert r.soc_pct == 20.0, "should have conceded after max_rejects"
+
+
+@pytest.mark.asyncio
+async def test_long_gap_allows_a_large_change():
+    """After a restart or outage the battery really can have moved a long way."""
+    rate = 10.0 / 47.0 * 100.0 / 60.0
+    cache = CachingTelemetryProvider(DriftingSite([80.0, 20.0]),
+                                     max_soc_rate_pct_per_min=rate)
+    t = datetime(2026, 9, 27, 12, 0, tzinfo=TZ)
+    await cache.read(t)
+    assert (await cache.read(t + timedelta(hours=4))).soc_pct == 20.0
+
+
+@pytest.mark.asyncio
+async def test_assumed_soc_is_flagged_not_silently_plausible():
+    """The stand-in SOC is min_reserve+10 = 35%, which looks exactly like a real
+    reading in the API output — it was misread as one during commissioning. The
+    decision must say plainly that the battery was never measured."""
+    cfg = AppConfig()
+    now = datetime(2026, 9, 27, 17, 50, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(fail_after=0), BoomForecast(), now)
+    runner.telemetry = CachingTelemetryProvider(BoomTelemetry(fail_after=0))
+
+    decision = await runner.make_decision()
+    assert decision.telemetry_assumed
+    assert decision.degraded
+    assert decision.starting_soc_pct == cfg.battery.min_reserve_soc_pct + 10.0
+    assert any("TELEMETRY UNAVAILABLE" in r for r in decision.rationale)
+    assert any("NOT measured" in r for r in decision.rationale)
+
+
+@pytest.mark.asyncio
+async def test_forecast_only_failure_is_not_labelled_as_telemetry_loss():
+    """A dead forecast is a much smaller problem than a dead battery reading, and
+    conflating them sent commissioning down the wrong path."""
+    cfg = AppConfig()
+    now = datetime(2026, 9, 27, 17, 50, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(fail_after=99), BoomForecast(), now)
+    decision = await runner.make_decision()
+    assert not decision.telemetry_assumed
+    assert decision.degraded
+    assert any("forecast unavailable" in r for r in decision.rationale)

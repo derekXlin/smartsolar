@@ -13,7 +13,7 @@
 services:
   zerohero:
     build: .
-    image: zerohero-dynamic-control:1.0.0
+    image: zerohero-dynamic-control:1.1.0
     container_name: zerohero
 
     # Restore the inverter and restart after a NAS reboot or a crash. "no" would
@@ -24,6 +24,10 @@ services:
       # The FoxESS key. Put it in a .env file next to this compose file; it is
       # never baked into the image. See .env.example.
       FOXESS_API_KEY: ${FOXESS_API_KEY:?set FOXESS_API_KEY in .env}
+      # config.example.yaml sets serial_number: ${FOXESS_SERIAL}, so this must be
+      # passed too or the container exits at startup. Both live in .env, which is
+      # gitignored — unlike this file, which is tracked and overwritten on pull.
+      FOXESS_SERIAL: ${FOXESS_SERIAL:?set FOXESS_SERIAL in .env (zerohero foxess-discover prints it)}
       TZ: Australia/Sydney
       ZEROHERO_API_HOST: 0.0.0.0
 

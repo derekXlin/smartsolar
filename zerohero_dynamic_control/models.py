@@ -199,6 +199,9 @@ class Decision(BaseModel):
     risk: RiskLevel = RiskLevel.OK
     degraded: bool = False
     """True when the plan was built on fallback data (forecast or telemetry failure)."""
+    telemetry_assumed: bool = False
+    """True when SOC could NOT be read and a stand-in value was used. Every number
+    in this decision is then a guess about the battery, not a measurement."""
     rationale: list[str] = Field(default_factory=list)
     inputs: dict[str, Any] = Field(default_factory=dict)
 

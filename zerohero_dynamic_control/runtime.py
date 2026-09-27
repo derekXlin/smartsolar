@@ -120,19 +120,32 @@ class EveningRunner:
         now = now or self.clock.now()
         window_start, window_end = self.engine.window_bounds(now)
 
+        telemetry_assumed = False
         try:
             tel = await self.telemetry.read(now)
         except ProviderError as exc:
-            log.error("no telemetry at decision time: %s", exc)
+            # Loud, and named. A stand-in SOC looks exactly like a real one in the
+            # output, and a plan built on a guessed battery state can abandon a
+            # winnable credit or over-export a pack that was never that full.
+            log.error("NO TELEMETRY at decision time (%s) — assuming %.0f%% SOC. "
+                      "Every figure below is a guess about the battery.",
+                      exc, self.cfg.battery.min_reserve_soc_pct + 10.0)
             tel = self._assumed_telemetry(now)
             self.degraded = True
+            telemetry_assumed = True
 
         solar, load, degraded = await self._curves(min(now, window_start), window_end)
         self.degraded = self.degraded or degraded
 
         notes = []
-        if self.degraded:
-            notes.append("DEGRADED: plan built on fallback data")
+        if telemetry_assumed:
+            notes.append(
+                f"TELEMETRY UNAVAILABLE — SOC was NOT measured. Assumed "
+                f"{tel.soc_pct:.0f}% (min_reserve + 10). Treat every figure here as "
+                f"a guess until a real reading returns."
+            )
+        elif self.degraded:
+            notes.append("DEGRADED: forecast unavailable, using fallback curves")
 
         decision = self.engine.plan(
             now=now,
@@ -143,6 +156,7 @@ class EveningRunner:
             notes=notes,
             morning_solar_to_battery_kwh=await self._morning_solar_estimate(window_end),
         )
+        decision.telemetry_assumed = telemetry_assumed
         self.decision = decision
         self.monitor = CreditMonitor(
             decision.window_start, decision.window_end, self.cfg.plan.import_limit_kwh_per_hour

@@ -566,3 +566,91 @@ def test_env_var_is_stripped_of_whitespace_and_quotes(monkeypatch, tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("providers:\n  foxess:\n    api_key: ${FOXESS_API_KEY}\n")
     assert AppConfig.load(cfg).providers.foxess.api_key == "abc-123"
+
+
+# --------------------------------------------------------- version-skew guard
+def test_unset_env_var_is_refused_by_name(monkeypatch):
+    """The common case: config references ${FOXESS_SERIAL} and nobody set it."""
+    import pytest as _pytest
+
+    from zerohero_dynamic_control.config import FoxESSConfig
+
+    monkeypatch.delenv("FOXESS_SERIAL", raising=False)
+    with _pytest.raises(Exception, match="FOXESS_SERIAL is not in the environment"):
+        FoxESSConfig(api_key="k", serial_number="${FOXESS_SERIAL}")
+
+
+def test_unexpanded_placeholder_never_reaches_the_api():
+    """Backstop for version skew. config.yaml is bind-mounted while the code lives
+    in the image, so a pull can hand new config to an old build — which happened:
+    the literal '${FOXESS_SERIAL}' went out as the serial, FoxESS answered errno 0
+    with an empty payload, and it surfaced four layers away as 'telemetry
+    unavailable'. If a future field is ever missed by the expansion validator,
+    this catches it instead of the vendor silently returning nothing."""
+    import pytest as _pytest
+
+    from zerohero_dynamic_control.config import FoxESSConfig
+
+    cfg = FoxESSConfig.model_construct(api_key="k", serial_number="${SOMETHING}")
+    with _pytest.raises(ValueError, match="newer than the running image"):
+        cfg._reject_unexpanded_placeholders()
+
+
+def test_empty_variable_response_names_the_serial():
+    """FoxESS returns errno 0 with no data for an unknown serial, so the error has
+    to say which serial was tried or it reads like a generic outage."""
+    import asyncio
+
+    import pytest as _pytest
+
+    from zerohero_dynamic_control.config import AppConfig
+    from zerohero_dynamic_control.data_providers.base import ProviderError
+    from zerohero_dynamic_control.data_providers.foxess import FoxESSTelemetryProvider
+
+    client = FakeFoxESS(responses={"/op/v0/device/real/query": []})
+    provider = FoxESSTelemetryProvider(AppConfig(), client, "WRONG-SN")
+    with _pytest.raises(ProviderError, match="WRONG-SN"):
+        asyncio.get_event_loop().run_until_complete(
+            provider.read(datetime(2026, 9, 27, 13, 0, tzinfo=TZ))
+        )
+
+
+def test_version_is_single_sourced():
+    """pyproject reads the version from __init__, so a bump cannot half-apply."""
+    import tomllib
+    from pathlib import Path
+
+    from zerohero_dynamic_control import __version__
+
+    pt = tomllib.loads(Path("pyproject.toml").read_text())
+    assert "version" in pt["project"].get("dynamic", []), "version must be dynamic"
+    assert pt["tool"]["setuptools"]["dynamic"]["version"]["attr"] == \
+        "zerohero_dynamic_control.__version__"
+    assert __version__.count(".") == 2
+
+
+def test_compose_files_pass_every_secret_the_example_config_needs():
+    """config.example.yaml references ${FOXESS_SERIAL}, so a compose file that
+    only passes FOXESS_API_KEY produces a container that exits at startup. The
+    two files are edited separately and drifted apart once already."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    # Only ACTIVE lines: the example also shows ${SOLCAST_API_KEY} and ${HA_TOKEN}
+    # inside commented-out optional provider blocks, which nothing must supply.
+    active = "\n".join(
+        line for line in (root / "config.example.yaml").read_text().splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    required = set(re.findall(r"\$\{([A-Z_]+)\}", active))
+    assert "FOXESS_SERIAL" in required, "guard assumes the example uses ${FOXESS_SERIAL}"
+
+    for name in ("docker-compose.yml", "docker-compose.registry.yml",
+                 "docker-compose.synology.yml.example", ".env.example"):
+        path = root / name
+        if not path.exists():
+            continue
+        text = path.read_text()
+        for var in required:
+            assert var in text, f"{name} never supplies {var}, which config.example.yaml needs"

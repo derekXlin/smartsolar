@@ -450,6 +450,36 @@ What differs from the standard file, and why:
 Because the key has to sit inline, `docker-compose.synology.yml` is gitignored and only
 the `.example` template is committed. Keep it that way.
 
+### Rebuilding: always tag the version
+
+```bash
+cd /path/to/repo && git pull
+sudo docker build --build-arg ZEROHERO_BUILD=$(git rev-parse --short HEAD) \
+                  -t zerohero:$(python3 -c 'import zerohero_dynamic_control as z;print(z.__version__)') \
+                  -t zerohero:latest .
+```
+
+Then confirm what is actually running:
+
+```bash
+curl -s http://localhost:8787/status | python3 -m json.tool | head -4
+#   "version": "1.1.0",
+#   "build":   "a1b2c3d",
+```
+
+This matters more than it looks. `config.yaml` is **bind-mounted from the host**
+while the code lives **inside the image**, so `git pull` applies config changes
+instantly while the code stays on the old build until you rebuild. That skew once
+sent a literal `${FOXESS_SERIAL}` to the API as a serial number; FoxESS replied
+`errno 0` with an empty payload, and it surfaced four layers away as "telemetry
+unavailable". Rebuilding into the same tag left nothing to reveal it.
+
+Two guards now exist, but seeing the version is the one that saves you time:
+
+- config referencing a `${VAR}` this build cannot expand fails **at startup**,
+  naming the field and saying the config is newer than the image;
+- an empty telemetry response names the serial it tried.
+
 ### Things that specifically bite in a container
 
 **SIGTERM must reach Python.** `docker stop`, a compose restart, a NAS package

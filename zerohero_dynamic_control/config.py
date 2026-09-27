@@ -326,6 +326,31 @@ class FoxESSConfig(BaseModel):
         return _from_env(v, "providers.foxess")
 
 
+    @model_validator(mode="after")
+    def _reject_unexpanded_placeholders(self) -> FoxESSConfig:
+        """Catch a ${VAR} that no validator expanded.
+
+        This is a version-skew guard. config.yaml is bind-mounted from the host
+        while the code lives in the image, so a `git pull` can hand new config to
+        old code. That happened: config.yaml gained `serial_number: ${FOXESS_SERIAL}`
+        before the image had the validator to expand it, so the literal string was
+        sent as the serial. FoxESS answered errno 0 with an empty result, which
+        surfaced four layers away as "telemetry unavailable" and cost an hour.
+
+        Failing here names the problem instead.
+        """
+        for field in ("api_key", "serial_number"):
+            value = getattr(self, field, None)
+            if isinstance(value, str) and "${" in value:
+                raise ValueError(
+                    f"providers.foxess.{field} is still the literal {value!r}. "
+                    f"This code version cannot expand it — your config.yaml is newer "
+                    f"than the running image. Rebuild the image, or put the literal "
+                    f"value in config.yaml."
+                )
+        return self
+
+
 class ProvidersConfig(BaseModel):
     battery: Literal["simulated", "foxess", "http", "homeassistant"] = "simulated"
     solar: Literal["simulated", "foxess", "http", "homeassistant"] = "simulated"
