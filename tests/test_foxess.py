@@ -598,23 +598,17 @@ def test_unexpanded_placeholder_never_reaches_the_api():
         cfg._reject_unexpanded_placeholders()
 
 
-def test_empty_variable_response_names_the_serial():
+@pytest.mark.asyncio
+async def test_empty_variable_response_names_the_serial():
     """FoxESS returns errno 0 with no data for an unknown serial, so the error has
     to say which serial was tried or it reads like a generic outage."""
-    import asyncio
-
-    import pytest as _pytest
-
-    from zerohero_dynamic_control.config import AppConfig
     from zerohero_dynamic_control.data_providers.base import ProviderError
     from zerohero_dynamic_control.data_providers.foxess import FoxESSTelemetryProvider
 
     client = FakeFoxESS(responses={"/op/v0/device/real/query": []})
     provider = FoxESSTelemetryProvider(AppConfig(), client, "WRONG-SN")
-    with _pytest.raises(ProviderError, match="WRONG-SN"):
-        asyncio.get_event_loop().run_until_complete(
-            provider.read(datetime(2026, 9, 27, 13, 0, tzinfo=TZ))
-        )
+    with pytest.raises(ProviderError, match="WRONG-SN"):
+        await provider.read(datetime(2026, 9, 27, 13, 0, tzinfo=TZ))
 
 
 def test_version_is_single_sourced():
