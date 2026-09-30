@@ -159,3 +159,36 @@ def test_report_labels_uncertain_hours_as_estimates():
     m.buckets[START + timedelta(hours=1)].imported_kwh = 0.165
     report = m.report()
     assert "OVER? (estimate" in report and "BREACH" in report
+
+
+# ------------------------------------------- measurement time, not poll time
+def test_a_snapshot_measured_before_the_window_is_ignored():
+    """29 Sep: the 18:00:00 poll returned a 17:57 snapshot of the house importing
+    0.46 kW before the window. Held to the next snapshot it put 36 Wh into 18:00
+    while the battery was exporting 8 kW."""
+    m = CreditMonitor(START, END)
+    m.observe(START - timedelta(minutes=3), 0.462)        # measured 17:57, polled 18:00
+    for k in range(1, 12):
+        m.observe(START + timedelta(minutes=5 * k), -8.3)  # exporting from 18:05
+    assert m.buckets[START].imported_kwh == pytest.approx(0.0)
+
+
+def test_a_snapshot_polled_again_is_counted_once():
+    """Polled every minute, the cloud repeats one snapshot for five; the repeats
+    carry the same measurement time and add nothing."""
+    once, polled = CreditMonitor(START, END), CreditMonitor(START, END)
+    for k, kw in enumerate([0.03, 0.43, 0.03]):
+        t = START + timedelta(minutes=30 + 5 * k)
+        once.observe(t, kw)
+        for _ in range(5):
+            polled.observe(t, kw)
+    assert polled.total_import_kwh == pytest.approx(once.total_import_kwh)
+
+
+def test_import_lands_in_the_hour_it_was_measured():
+    """A 19:57 snapshot polled at 20:01 belongs to 19:00, not 20:00."""
+    m = CreditMonitor(START, END)
+    m.observe(datetime(2026, 1, 15, 19, 52, tzinfo=TZ), 0.6)
+    m.observe(datetime(2026, 1, 15, 19, 57, tzinfo=TZ), 0.6)
+    assert m.buckets[datetime(2026, 1, 15, 19, 0, tzinfo=TZ)].imported_kwh == pytest.approx(0.05)
+    assert m.buckets[datetime(2026, 1, 15, 20, 0, tzinfo=TZ)].imported_kwh == pytest.approx(0.0)

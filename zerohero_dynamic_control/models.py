@@ -98,6 +98,15 @@ class Telemetry(BaseModel):
     grid_kw: float = 0.0
     stale: bool = False
     """True when this sample came from a fallback/cached path rather than live hardware."""
+    measured_at: datetime | None = None
+    """When the source measured these values, if it says. ``timestamp`` is when we
+    asked; the FoxESS cloud answers with a snapshot up to ~5 minutes older, and
+    repeats it until the next upload."""
+
+    @property
+    def observed_time(self) -> datetime:
+        """The best time to attribute these values to: measured, else polled."""
+        return self.measured_at or self.timestamp
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -52,10 +52,23 @@ class CreditMonitor:
         Trapezoidal rather than rectangular because with a 60 s poll and a 0.03 kWh
         budget, treating a ramp as a step can misestimate the hour by a third of the
         entire allowance.
+
+        ``when`` should be the MEASUREMENT time (Telemetry.observed_time). Two rules
+        follow from it:
+          * a sample measured before the window opens says nothing about the window.
+            On 29 Sep the first poll at 18:00 returned a 17:5x snapshot of the house
+            importing 0.46 kW before the window; held to the next snapshot it put
+            36 Wh into the 18:00 hour while the battery was exporting 8 kW;
+          * a snapshot polled again is not new information, so a repeat (same or
+            older time) is ignored rather than integrated as continued import.
         """
+        if when < self.window_start:
+            return
         import_kw = max(0.0, grid_kw)
         if self._last_sample is not None:
             prev_t, prev_kw = self._last_sample
+            if when <= prev_t:
+                return
             gap = when - prev_t
             if timedelta(0) < gap <= MAX_SAMPLE_GAP:
                 energy = (prev_kw + import_kw) / 2.0 * gap.total_seconds() / 3600.0

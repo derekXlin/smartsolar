@@ -70,7 +70,8 @@ class Ledger:
             for line in fh:
                 try:
                     raw = json.loads(line)
-                    when = datetime.fromisoformat(raw["timestamp"])
+                    # Measurement time where the source gave one (since 1.3.3).
+                    when = datetime.fromisoformat(raw.get("measured_at") or raw["timestamp"])
                     if start <= when < end:
                         out.append((when, float(raw["grid_kw"])))
                 except (ValueError, KeyError, TypeError):

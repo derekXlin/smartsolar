@@ -191,9 +191,18 @@ class EveningRunner:
                         samples[-1][0].strftime("%H:%M"), self.monitor.report())
 
     def _account(self, when: datetime, grid_kw: float) -> None:
-        """Feed one sample into the credit monitor and the export total."""
+        """Feed one sample into the credit monitor and the export total.
+
+        ``when`` is the measurement time. Snapshots measured before the window,
+        or polled again, are skipped for the same reasons as in CreditMonitor.
+        """
         if self.monitor:
             self.monitor.observe(when, grid_kw)
+        if self.decision is not None and when < self.decision.window_start:
+            return
+        prev = getattr(self, "_last_export_sample", None)
+        if prev is not None and when <= prev[0]:
+            return
         export_kw = max(0.0, -grid_kw)
         if grid_kw < 0:
             # Accumulate exported energy between samples.
@@ -395,7 +404,7 @@ class EveningRunner:
         self.last_telemetry = tel
         if isinstance(self.controller, SafetyWrapper):
             self.controller.observe_soc(tel.soc_pct)
-        self._account(now, tel.grid_kw)
+        self._account(tel.observed_time, tel.grid_kw)
 
         mode, reason = self.choose_mode(tel, now)
         if mode is BatteryMode.FORCE_EXPORT:

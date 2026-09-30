@@ -151,6 +151,7 @@ class FoxESSModbusTelemetryProvider(TelemetryProvider):
             battery_kw=raw["battery_kw"],
             # The meter reports export positive; ours is import positive.
             grid_kw=-raw["grid_export_kw"],
+            measured_at=now,                     # read live, seconds old
         )
 
     async def read(self, now: datetime) -> Telemetry:

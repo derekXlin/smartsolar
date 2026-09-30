@@ -40,9 +40,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -51,6 +52,22 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://www.foxesscloud.com"
 USER_AGENT = "zerohero-dynamic-control/1.0"
+
+
+_FOXESS_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*[A-Za-z]*([+-])(\d{2}):?(\d{2})$")
+
+
+def parse_foxess_time(text: Any) -> datetime | None:
+    """'2026-09-29 21:14:48 AEST+1000' -> an aware datetime. None if unrecognised,
+    so a format change falls back to poll time instead of failing the read."""
+    if not isinstance(text, str):
+        return None
+    m = _FOXESS_TIME.match(text.strip())
+    if not m:
+        return None
+    stamp, sign, hh, mm = m.groups()
+    offset = timedelta(hours=int(hh), minutes=int(mm)) * (1 if sign == "+" else -1)
+    return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(offset))
 
 
 class FoxESSError(RuntimeError):
@@ -237,9 +254,21 @@ class FoxESSClient:
 
     async def real_query(self, sn: str, variables: list[str]) -> dict[str, float]:
         """Return {variable: value} for one inverter."""
+        values, _ = await self.real_query_timed(sn, variables)
+        return values
+
+    async def real_query_timed(self, sn: str, variables: list[str]) -> tuple[dict[str, float], datetime | None]:
+        """{variable: value} plus WHEN the logger measured them.
+
+        The cloud answers every poll with its latest snapshot, which the logger
+        uploads about every five minutes, so the answer can be minutes old. The
+        response carries the measurement time as "2026-09-29 21:14:48 AEST+1000".
+        """
         result = await self.request("/op/v0/device/real/query", {"sn": sn, "variables": variables})
         rows = result or []
+        measured_at = None
         if rows and isinstance(rows[0], dict) and "datas" in rows[0]:
+            measured_at = parse_foxess_time(rows[0].get("time"))
             rows = rows[0]["datas"]
         out: dict[str, float] = {}
         for row in rows:
@@ -251,7 +280,7 @@ class FoxESSClient:
                 out[name] = float(value)
             except (TypeError, ValueError):
                 log.debug("FoxESS variable %s had non-numeric value %r", name, value)
-        return out
+        return out, measured_at
 
     async def get_min_soc(self, sn: str) -> dict[str, Any]:
         return await self.request(f"/op/v0/device/battery/soc/get?sn={sn}", method="GET")

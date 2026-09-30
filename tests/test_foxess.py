@@ -820,3 +820,27 @@ async def test_our_own_group_is_never_adopted_as_the_baseline(tmp_path):
                             max_power_kw=10.0, baseline_path=tmp_path / "b.json")
     await ctl2.set_mode(BatteryMode.FORCE_EXPORT, now=datetime(2026, 9, 27, 18, 30, tzinfo=TZ))
     assert ctl2._baseline == [FREE_CHARGE_GROUP]
+
+
+# ------------------------------------------------- when a reading was measured
+def test_foxess_measurement_time_parses_with_its_offset():
+    from zerohero_dynamic_control.foxess_client import parse_foxess_time
+
+    t = parse_foxess_time("2026-09-29 21:14:48 AEST+1000")
+    assert t == datetime(2026, 9, 29, 21, 14, 48, tzinfo=TZ)
+    assert parse_foxess_time("2026-01-15 18:00:00 AEDT+1100") == datetime(2026, 1, 15, 18, 0, tzinfo=TZ)
+    assert parse_foxess_time("not a time") is None and parse_foxess_time(None) is None
+
+
+@pytest.mark.asyncio
+async def test_telemetry_carries_the_cloud_measurement_time():
+    """The cloud answers with a snapshot up to ~5 minutes old; its own time says how old."""
+    client = FakeFoxESS(responses={"/op/v0/device/real/query": [{
+        "datas": [{"variable": "SoC", "value": 66.0}, {"variable": "gridConsumptionPower", "value": 0.46}],
+        "time": "2026-09-29 17:57:12 AEST+1000",
+    }]})
+    provider = FoxESSTelemetryProvider(AppConfig(), client, "SN")
+    tel = await provider.read(datetime(2026, 9, 29, 18, 0, tzinfo=TZ))
+    assert tel.timestamp == datetime(2026, 9, 29, 18, 0, tzinfo=TZ)
+    assert tel.measured_at == datetime(2026, 9, 29, 17, 57, 12, tzinfo=TZ)
+    assert tel.observed_time == tel.measured_at

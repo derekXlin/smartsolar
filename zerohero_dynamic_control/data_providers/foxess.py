@@ -48,7 +48,7 @@ class FoxESSTelemetryProvider(TelemetryProvider):
 
     async def read(self, now: datetime) -> Telemetry:
         try:
-            raw = await self.client.real_query(self.sn, VARIABLES)
+            raw, measured_at = await self.client.real_query_timed(self.sn, VARIABLES)
         except FoxESSError as exc:
             raise ProviderError(f"FoxESS telemetry read failed: {exc}") from exc
         if not raw:
@@ -59,9 +59,10 @@ class FoxESSTelemetryProvider(TelemetryProvider):
                 f"The API accepted the request, so the serial is probably wrong — "
                 f"run `zerohero foxess-discover` to confirm it."
             )
-        return self.to_telemetry(raw, now)
+        return self.to_telemetry(raw, now, measured_at=measured_at)
 
-    def to_telemetry(self, raw: dict[str, float], now: datetime) -> Telemetry:
+    def to_telemetry(self, raw: dict[str, float], now: datetime, *,
+                     measured_at: datetime | None = None) -> Telemetry:
         """Normalise FoxESS variables into our sign convention.
 
         Ours: battery_kw > 0 discharging, grid_kw > 0 importing.
@@ -103,6 +104,7 @@ class FoxESSTelemetryProvider(TelemetryProvider):
             load_kw=load,
             battery_kw=battery,
             grid_kw=grid,
+            measured_at=measured_at,
         )
 
     async def aclose(self) -> None:

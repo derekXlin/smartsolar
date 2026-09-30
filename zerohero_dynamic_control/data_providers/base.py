@@ -196,8 +196,12 @@ class CachingTelemetryProvider(TelemetryProvider):
         """
         if self.max_soc_rate_pct_per_min is None or self._last is None:
             return None
-        since = self._observed_at or self._last.timestamp
-        dt_min = (reading.timestamp - since).total_seconds() / 60.0
+        if reading.measured_at is not None and self._last.measured_at is not None:
+            # The source says when it measured: exact.
+            dt_min = (reading.measured_at - self._last.measured_at).total_seconds() / 60.0
+        else:
+            since = self._observed_at or self._last.timestamp
+            dt_min = (reading.timestamp - since).total_seconds() / 60.0
         if dt_min <= 0 or dt_min > 15:
             # A long gap (restart, outage) legitimately allows a large change.
             return None
