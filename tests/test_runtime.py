@@ -268,6 +268,37 @@ async def test_one_point_soc_tick_is_not_rejected():
     assert cache.rejected_samples == 0
 
 
+class CloudSnapshots(TelemetryProvider):
+    """The FoxESS cloud: polled every minute, a new snapshot only every five."""
+
+    name = "cloud"
+
+    def __init__(self, t0, socs):
+        self.t0, self.socs = t0, socs
+
+    async def read(self, now):
+        i = min(int((now - self.t0).total_seconds() // 300), len(self.socs) - 1)
+        soc = self.socs[i]
+        return Telemetry(timestamp=now, soc_pct=soc, battery_energy_kwh=soc_to_energy(soc, 47.0),
+                         load_kw=1.8 + 0.01 * i, battery_kw=9.2, grid_kw=-7.4 - 0.01 * i)
+
+
+@pytest.mark.asyncio
+async def test_fast_discharge_through_cloud_snapshots_is_not_rejected():
+    """28 Sep, 18:05-18:41: exporting at 9.2 kW, the cloud delivered SOC in 2-point
+    steps five minutes apart. Measured from the previous POLL a minute earlier that
+    is 2 points a minute, and every fresh snapshot was rejected once. Measured from
+    when the previous snapshot appeared, it is 0.4 a minute: entirely plausible."""
+    rate = 10.0 / 47.0 * 100.0 / 60.0
+    t0 = datetime(2026, 9, 28, 18, 5, tzinfo=TZ)
+    cache = CachingTelemetryProvider(CloudSnapshots(t0, [96, 94, 92, 90, 88, 86, 84, 82]),
+                                     max_soc_rate_pct_per_min=rate)
+    for minute in range(0, 40):
+        r = await cache.read(t0 + timedelta(minutes=minute))
+        assert not r.stale, f"rejected at +{minute} min"
+    assert cache.rejected_samples == 0
+
+
 @pytest.mark.asyncio
 async def test_persistent_disagreement_eventually_wins():
     """If the 'impossible' value keeps coming back, our baseline is the wrong one.

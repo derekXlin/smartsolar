@@ -50,6 +50,12 @@ class ForecastProvider(abc.ABC):
         return None
 
 
+def _measured(t: Telemetry) -> tuple[float, ...]:
+    """The measured content of a reading, without its poll time. Equal tuples mean
+    the source handed back the same snapshot again."""
+    return (t.soc_pct, t.battery_energy_kwh, t.solar_kw, t.load_kw, t.battery_kw, t.grid_kw)
+
+
 class FailoverTelemetryProvider(TelemetryProvider):
     """Read the primary source; fall back to a slower one while it is down.
 
@@ -152,6 +158,9 @@ class CachingTelemetryProvider(TelemetryProvider):
         self.soc_resolution_pct = soc_resolution_pct
         self.name = f"caching({inner.name})"
         self._last: Telemetry | None = None
+        self._observed_at: datetime | None = None
+        """When the snapshot in _last first appeared. The cloud repeats one snapshot
+        for about five minutes, so this, not _last.timestamp, is how old it is."""
         self.consecutive_failures = 0
         self.consecutive_rejects = 0
         self.rejected_samples = 0
@@ -178,10 +187,17 @@ class CachingTelemetryProvider(TelemetryProvider):
         times on the first live evening — and each rejection threw away the fresh
         snapshot and dropped the loop to its blind fallback. At 18:50 the discarded
         snapshot was the one showing a 4 kW load spike.
+
+        Time is measured from when the previous snapshot first APPEARED, not from
+        the last poll. The cloud serves one snapshot for about five minutes, so at
+        9 kW the SOC arrives in 2-point steps five minutes apart; measured from a
+        poll one minute earlier that looked like 2 points a minute, and every
+        fresh snapshot of the 28 Sep export was rejected once.
         """
         if self.max_soc_rate_pct_per_min is None or self._last is None:
             return None
-        dt_min = (reading.timestamp - self._last.timestamp).total_seconds() / 60.0
+        since = self._observed_at or self._last.timestamp
+        dt_min = (reading.timestamp - since).total_seconds() / 60.0
         if dt_min <= 0 or dt_min > 15:
             # A long gap (restart, outage) legitimately allows a large change.
             return None
@@ -217,6 +233,8 @@ class CachingTelemetryProvider(TelemetryProvider):
                             "treating the earlier baseline as wrong", self.consecutive_rejects)
 
             self.consecutive_rejects = 0
+            if self._last is None or _measured(reading) != _measured(self._last):
+                self._observed_at = reading.timestamp
             self._last = reading
             return reading
         except Exception as exc:  # noqa: BLE001 - provider failures must never propagate
