@@ -510,6 +510,13 @@ class EveningRunner:
         if partial:
             notes.append(f"PARTIAL: closed out at {now:%H:%M}, before the window ended — "
                          f"a later row for this date supersedes this one")
+        uncertain = [b for b in (monitor.breached_hours() if monitor else []) if not b.clearly_breached]
+        if uncertain and not any(b.clearly_breached for b in monitor.breached_hours()):
+            notes.append(
+                "CHECK BILL: " + ", ".join(f"{b.hour_start:%H:%M} estimated {b.imported_kwh * 1000:.0f} Wh"
+                                           for b in uncertain)
+                + " — over the limit, but within the error of five-minute cloud readings"
+            )
         if monitor and monitor.breach_free and not verified:
             notes.append("UNVERIFIED: no breach seen, but not every hour was watched, "
                          "so the credit cannot be claimed")

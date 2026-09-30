@@ -123,3 +123,39 @@ def test_a_long_gap_is_neither_integrated_nor_watched():
     m.observe(START + timedelta(minutes=20), 3.0)
     assert m.total_import_kwh == pytest.approx(0.0)
     assert m.buckets[START].observed_minutes == pytest.approx(0.0)
+
+
+def _outcome(wh_by_hour, observed=60.0):
+    from zerohero_dynamic_control.models import DailyOutcome, HourImport
+
+    hours = [HourImport(hour_start=START + timedelta(hours=i), imported_kwh=wh / 1000,
+                        observed_minutes=observed) for i, wh in enumerate(wh_by_hour)]
+    secured = all(not h.breached for h in hours)
+    verified = all(h.verified for h in hours)
+    return DailyOutcome(date="2026-09-28", hourly_import=hours,
+                        credit_secured=secured and verified, credit_verified=verified)
+
+
+def test_an_estimate_just_over_the_limit_defers_to_the_bill():
+    """28 Sep: the controller estimated 13 / 61 / 23 Wh from five-minute cloud
+    readings, and GloBird paid the credit. Calling that a miss was wrong."""
+    from zerohero_dynamic_control.ledger import verdict_of
+
+    assert verdict_of(_outcome([13.3, 60.8, 22.6])) == "CHECK BILL"
+
+
+def test_an_estimate_far_over_the_limit_is_a_miss():
+    """27 Sep: 165 Wh estimated in the 18:00 hour, and the credit was lost."""
+    from zerohero_dynamic_control.ledger import verdict_of
+
+    assert verdict_of(_outcome([164.7, 0.0, 0.0])) == "MISSED"
+    assert verdict_of(_outcome([5.0, 4.0, 3.0])) == "SECURED"
+    assert verdict_of(_outcome([5.0, 4.0, 3.0], observed=30.0)) == "UNVERIFIED"
+
+
+def test_report_labels_uncertain_hours_as_estimates():
+    m = CreditMonitor(START, END)
+    m.buckets[START].imported_kwh = 0.061
+    m.buckets[START + timedelta(hours=1)].imported_kwh = 0.165
+    report = m.report()
+    assert "OVER? (estimate" in report and "BREACH" in report

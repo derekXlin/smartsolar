@@ -229,6 +229,12 @@ class ControlCommand(BaseModel):
     reason: str = ""
 
 
+BREACH_CERTAINTY_FACTOR = 3.0
+"""How many times the hourly limit an ESTIMATE must reach before the ledger calls
+the credit lost. Between 1x and this, the bill decides. Set from two evenings of
+cloud telemetry (see HourImport.clearly_breached); revisit with more bills."""
+
+
 class HourImport(BaseModel):
     """Import energy accumulated inside one clock hour of the credit window."""
 
@@ -249,9 +255,24 @@ class HourImport(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def breached(self) -> bool:
+        """The ESTIMATE is at or over the limit. Enough to make the loop cautious,
+        not enough to call the credit lost — see clearly_breached."""
         # Strict '<' in the plan rules; use a tiny epsilon so float noise at exactly
         # the limit is treated as a breach rather than a pass.
         return self.imported_kwh >= self.limit_kwh - 1e-9
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def clearly_breached(self) -> bool:
+        """Far enough over that estimation error cannot explain it.
+
+        The estimate integrates readings the cloud refreshes every ~5 minutes, so
+        a momentary draw the inverter corrects in seconds is counted as five
+        minutes of import. On 28 Sep the 19:00 hour estimated 61 Wh (2x the limit)
+        and GloBird paid the credit; on 27 Sep the 18:00 hour estimated 165 Wh
+        (5.5x) and the credit was lost. The line sits between those two.
+        """
+        return self.imported_kwh >= BREACH_CERTAINTY_FACTOR * self.limit_kwh
 
     @computed_field  # type: ignore[prop-decorator]
     @property

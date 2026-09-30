@@ -201,7 +201,8 @@ def ledger(
     for col in ("date", "exported", "import", "final SOC", "$1", "net $"):
         t.add_column(col, justify="right" if col != "date" else "left")
     secured = 0
-    shown = {"SECURED": "[green]YES[/]", "MISSED": "[red]NO[/]", "UNVERIFIED": "[yellow]?[/]"}
+    shown = {"SECURED": "[green]YES[/]", "MISSED": "[red]NO[/]", "UNVERIFIED": "[yellow]?[/]",
+             "CHECK BILL": "[yellow]check bill[/]"}
     for r in rows:
         verdict = verdict_of(r)
         secured += int(verdict == "SECURED")

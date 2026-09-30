@@ -123,8 +123,10 @@ class CreditMonitor:
     def report(self) -> str:
         def one(b: HourImport) -> str:
             head = f"{b.hour_start:%H:%M} {b.imported_kwh * 1000:6.1f} Wh"
-            if b.breached:
+            if b.clearly_breached:
                 return head + "  BREACH"
+            if b.breached:
+                return head + "  OVER? (estimate; the bill decides)"
             if not b.verified:
                 return head + f"  UNVERIFIED ({b.observed_minutes:.0f}/{b.span_minutes:.0f} min seen)"
             return head + f"  ({b.headroom_kwh * 1000:5.1f} Wh left)"

@@ -136,9 +136,18 @@ class Ledger:
 
 
 def verdict_of(outcome: DailyOutcome) -> str:
-    """SECURED, MISSED, or UNVERIFIED when no breach was seen but hours went unwatched."""
+    """The controller's own verdict. GloBird's bill is the final word.
+
+    SECURED     every hour watched and estimated under the limit
+    MISSED      an hour so far over that estimation error cannot explain it
+    CHECK BILL  an hour estimated over the limit, but within the error of
+                five-minute cloud readings (28 Sep: estimated 61 Wh, credit paid)
+    UNVERIFIED  no hour over, but not every hour was watched
+    """
     if outcome.credit_secured and outcome.credit_verified:
         return "SECURED"
-    if any(h.breached for h in outcome.hourly_import):
+    if any(h.clearly_breached for h in outcome.hourly_import):
         return "MISSED"
+    if any(h.breached for h in outcome.hourly_import):
+        return "CHECK BILL"
     return "UNVERIFIED"
