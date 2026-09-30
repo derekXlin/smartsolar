@@ -146,6 +146,9 @@ class EveningRunner:
             )
         elif self.degraded:
             notes.append("DEGRADED: forecast unavailable, using fallback curves")
+        load_note = getattr(self.forecast, "load_note", None)
+        if load_note:
+            notes.append(load_note)
 
         decision = self.engine.plan(
             now=now,

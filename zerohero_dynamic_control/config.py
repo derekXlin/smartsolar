@@ -319,6 +319,12 @@ class ForecastConfig(BaseModel):
     """Fallback: average house load across 18:00-21:00."""
     load_profile_kw: dict[str, float] = Field(default_factory=dict)
     """Optional hour-of-day -> kW map used by the static load forecaster."""
+    learn_load_days: int = Field(7, ge=0)
+    """Forecast the evening load from the mean of this many recent evenings of the
+    controller's own readings (samples.jsonl). 0 turns it off. Slots without
+    enough history fall back to load_profile_kw / static_evening_load_kw."""
+    learn_load_min_days: int = Field(3, ge=1)
+    """Evenings of history a 15-minute slot needs before its learned value is used."""
 
     @field_validator("solcast_api_key", mode="before")
     @classmethod

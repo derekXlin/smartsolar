@@ -201,6 +201,14 @@ forecast:
     "21": 1.9
     "22": 1.6
 
+  # Replace the profile above with what the house actually drew: the mean of the
+  # last N evenings of the controller's own readings, per 15 minutes. Slots with
+  # fewer than learn_load_min_days evenings of history keep the profile. A guessed
+  # profile that runs high makes the 17:50 plan sell too little, and each replan
+  # then sells the leftover in short bursts. 0 turns learning off.
+  learn_load_days: 7
+  learn_load_min_days: 3
+
 providers:
   # simulated | foxess | http | homeassistant
   # All three come from the ONE FoxESS real/query call — SoC, PV, load and grid

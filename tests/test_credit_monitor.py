@@ -192,3 +192,25 @@ def test_import_lands_in_the_hour_it_was_measured():
     m.observe(datetime(2026, 1, 15, 19, 57, tzinfo=TZ), 0.6)
     assert m.buckets[datetime(2026, 1, 15, 19, 0, tzinfo=TZ)].imported_kwh == pytest.approx(0.05)
     assert m.buckets[datetime(2026, 1, 15, 20, 0, tzinfo=TZ)].imported_kwh == pytest.approx(0.0)
+
+
+def test_ledger_summary_counts_check_bill_days_apart_from_misses(tmp_path):
+    """It said 'secured on 1/4 days ($3.00 left on the table)' when GloBird had
+    paid two of the three."""
+    from typer.testing import CliRunner
+
+    from zerohero_dynamic_control.cli import app
+    from zerohero_dynamic_control.ledger import Ledger
+
+    ledger = Ledger(tmp_path / "ledger.jsonl", tmp_path / "decisions.jsonl")
+    for day, wh, net in (("2026-09-27", [164.7, 0, 0], 1.58), ("2026-09-28", [13.3, 60.8, 22.6], 1.08),
+                         ("2026-09-30", [0.0, 24.0, 6.1], -0.08)):
+        o = _outcome(wh).model_copy(update={"date": day, "estimated_revenue_aud": net})
+        ledger._append(ledger.outcome_path, o.model_dump(mode="json"))
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"logging:\n  ledger_path: {tmp_path / 'ledger.jsonl'}\n"
+                   f"  decision_log_path: {tmp_path / 'decisions.jsonl'}\n  samples_path: null\n")
+    out = CliRunner().invoke(app, ["ledger", "-c", str(cfg)], env={"COLUMNS": "150"}).output
+    assert "secured 1, check bill 1, unverified 0, missed 1" in out
+    assert "$1.00 lost on missed days" in out
+    assert "0.08*" in out, "a check-bill day is shown as if paid, and flagged"

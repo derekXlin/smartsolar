@@ -70,9 +70,19 @@ def build_modbus_telemetry_provider(cfg: AppConfig) -> TelemetryProvider:
 
 
 def build_forecast_provider(cfg: AppConfig) -> ForecastProvider:
+    provider: ForecastProvider
     if cfg.forecast.provider == "open_meteo":
         from .open_meteo import OpenMeteoForecastProvider
 
-        return OpenMeteoForecastProvider(cfg)
-    # 'solcast' would slot in here; 'static' and 'simulated' both use the clear-sky model.
-    return StaticForecastProvider(cfg)
+        provider = OpenMeteoForecastProvider(cfg)
+    else:
+        # 'solcast' would slot in here; 'static' and 'simulated' both use the clear-sky model.
+        provider = StaticForecastProvider(cfg)
+    if cfg.forecast.learn_load_days > 0 and cfg.logging.samples_path is not None:
+        from .learned_load import LearnedLoadForecastProvider
+
+        provider = LearnedLoadForecastProvider(
+            provider, cfg.logging.samples_path, tz=cfg.site.tz,
+            days=cfg.forecast.learn_load_days, min_days=cfg.forecast.learn_load_min_days,
+        )
+    return provider

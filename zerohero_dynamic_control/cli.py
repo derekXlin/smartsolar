@@ -200,18 +200,28 @@ def ledger(
     t = Table(title=f"Last {len(rows)} days", header_style="bold")
     for col in ("date", "exported", "import", "final SOC", "$1", "net $"):
         t.add_column(col, justify="right" if col != "date" else "left")
-    secured = 0
     shown = {"SECURED": "[green]YES[/]", "MISSED": "[red]NO[/]", "UNVERIFIED": "[yellow]?[/]",
              "CHECK BILL": "[yellow]check bill[/]"}
+    counts = {v: 0 for v in shown}
+    credit = cfg.plan.daily_credit_aud
     for r in rows:
         verdict = verdict_of(r)
-        secured += int(verdict == "SECURED")
+        counts[verdict] += 1
+        # The stored net assumes no credit unless SECURED. Where the bill decides,
+        # show it as if paid and flag it, rather than booking a loss nobody saw.
+        unknown = verdict in ("CHECK BILL", "UNVERIFIED")
+        net = r.estimated_revenue_aud - credit if unknown else r.estimated_revenue_aud
         t.add_row(r.date, f"{r.exported_kwh:.2f}", f"{r.imported_kwh * 1000:.0f} Wh",
-                  f"{r.final_soc_pct:.0f}%", shown[verdict],
-                  f"{r.estimated_revenue_aud:.2f}")
+                  f"{r.final_soc_pct:.0f}%", shown[verdict], f"{net:.2f}" + ("*" if unknown else ""))
     console.print(t)
-    console.print(f"credit secured on [bold]{secured}/{len(rows)}[/] days "
-                  f"(${(len(rows) - secured) * cfg.plan.daily_credit_aud:.2f} left on the table)")
+    console.print(
+        f"secured {counts['SECURED']}, check bill {counts['CHECK BILL']}, "
+        f"unverified {counts['UNVERIFIED']}, missed {counts['MISSED']} "
+        f"(${counts['MISSED'] * credit:.2f} lost on missed days)"
+    )
+    if counts["CHECK BILL"] or counts["UNVERIFIED"]:
+        console.print("[dim]* assumes the credit was paid; GloBird's bill decides. "
+                      "net $ is the controller's estimate, not the bill.[/]")
 
 
 @app.command()
