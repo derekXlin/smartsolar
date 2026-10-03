@@ -32,6 +32,8 @@ services:
       # Empty when unset, so leaving them out of .env changes nothing.
       GLOBIRD_EMAIL: ${GLOBIRD_EMAIL:-}
       GLOBIRD_PASSWORD: ${GLOBIRD_PASSWORD:-}
+      # Optional: ntfy topic for the daily messages (notify.enabled). A secret.
+      NTFY_TOPIC: ${NTFY_TOPIC:-}
       TZ: Australia/Sydney
       ZEROHERO_API_HOST: 0.0.0.0
 

@@ -322,6 +322,71 @@ def globird_fetch(
     console.print(f"recorded {len(fresh)} day(s)")
 
 
+def _foxess_history_client(cfg: AppConfig):
+    """A FoxESS cloud client for the overnight history, or None without credentials."""
+    fox = cfg.providers.foxess
+    if cfg.providers.battery != "foxess" or not fox.api_key:
+        return None
+    from .foxess_client import CallBudget, FoxESSClient
+
+    return FoxESSClient(fox.api_key, base_url=fox.base_url, timezone=cfg.site.timezone,
+                        budget=CallBudget(daily_limit=fox.daily_call_limit, reserve=fox.call_reserve))
+
+
+@app.command("notify-test")
+def notify_test(config: Path | None = ConfigOpt) -> None:
+    """Send a test message to the ntfy topic in NTFY_TOPIC."""
+    from .notify import ENV_TOPIC, ntfy_from_env
+
+    cfg = _load(config, "WARNING")
+    ntfy = ntfy_from_env(cfg.notify.server)
+    if ntfy is None:
+        console.print(f"[red]{ENV_TOPIC} is not set.[/] Put it in the .env beside your compose file.")
+        raise typer.Exit(1)
+    ok = asyncio.run(ntfy.send("ZeroHero test", "If you can read this, daily messages will arrive here.",
+                               tags=["wave"]))
+    console.print("[green]sent[/]" if ok else "[red]ntfy did not accept the message[/] (see the log)")
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command("notify-preview")
+def notify_preview(
+    config: Path | None = ConfigOpt,
+    day: str | None = typer.Option(None, "--date", help="YYYY-MM-DD (default: yesterday)"),
+    send: bool = typer.Option(False, "--send", help="Also send it (does not count as the daily message)"),
+) -> None:
+    """Show the morning summary for a day, as it would be sent."""
+    from datetime import date as date_type
+    from datetime import datetime, timedelta
+
+    from . import __version__
+    from .ledger import Ledger
+    from .notify import morning_message, ntfy_from_env
+
+    cfg = _load(config, "WARNING")
+    now = datetime.now(cfg.site.tz)
+    target = date_type.fromisoformat(day) if day else (now - timedelta(days=1)).date()
+    ledger = Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path)
+    client = _foxess_history_client(cfg)
+
+    async def _run():
+        try:
+            return await morning_message(cfg, ledger, target, now, foxess_client=client,
+                                         health=[f"Controller {__version__} (preview)"])
+        finally:
+            if client is not None:
+                await client.aclose()
+
+    title, body, tags, _ = asyncio.run(_run())
+    console.print(f"[bold]{title}[/]\n{body}")
+    if send:
+        ntfy = ntfy_from_env(cfg.notify.server)
+        if ntfy is None:
+            console.print("[red]NTFY_TOPIC is not set[/]")
+            raise typer.Exit(1)
+        console.print("[green]sent[/]" if asyncio.run(ntfy.send(title, body, tags=tags)) else "[red]not sent[/]")
+
+
 @app.command()
 def run(config: Path | None = ConfigOpt, log_level: str = typer.Option("INFO", "--log-level")) -> None:
     """Start the scheduler daemon."""

@@ -309,6 +309,15 @@ globird:
   fetch_times: ["07:30", "10:30", "13:30", "16:30"]
   days: 7
 
+# Daily push messages via ntfy (https://ntfy.sh): yesterday's result in the
+# morning (with GloBird's bill once published), tonight's plan at 17:50.
+# The topic is NTFY_TOPIC in .env. Check with: zerohero notify-test
+notify:
+  enabled: false
+  server: https://ntfy.sh
+  morning_deadline: "11:00"   # send by then even if the bill is not in yet
+  evening: true
+
 logging:
   level: INFO
   ledger_path: var/ledger.jsonl

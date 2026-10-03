@@ -215,6 +215,8 @@ zerohero globird-fetch --dry-run
                     # read those figures from the GloBird portal instead
                     # (GLOBIRD_EMAIL / GLOBIRD_PASSWORD in .env; globird.enabled
                     #  in config.yaml fetches them daily)
+zerohero notify-test / notify-preview [--date D] [--send]
+                    # daily ntfy messages (NTFY_TOPIC in .env, notify.enabled)
 ```
 
 API (`pip install -e '.[api]'`):

@@ -46,6 +46,12 @@ class ZeroHeroScheduler:
         )
         self.current_runner: EveningRunner | None = None
         self.bill_status: dict | None = None
+        from .notify import NotifyState, ntfy_from_env
+
+        self.notifier = ntfy_from_env(cfg.notify.server) if cfg.notify.enabled else None
+        if cfg.notify.enabled and self.notifier is None:
+            log.error("notify.enabled is set but NTFY_TOPIC is not; no messages will be sent")
+        self.notify_state = NotifyState(cfg.logging.ledger_path.parent / "notify_state.json")
         self.assurance: FreeChargeAssurance | None = None
         self._stop: asyncio.Event | None = None
         self._scheduler = None
@@ -67,6 +73,7 @@ class ZeroHeroScheduler:
                 log.error("controller health check failed — running in degraded mode")
                 runner.degraded = True
             await runner.make_decision()
+            await self._send_evening_plan(runner)
             # Retry the first command. The very first live evening died because
             # one rejected API call raised straight out of the job, and nothing
             # retried it for the remaining three hours of the window.
@@ -142,6 +149,58 @@ class ZeroHeroScheduler:
             log.info("GloBird %s: credit %s, day $%.2f", bill.date,
                      "PAID" if bill.credit_paid else "NOT paid", bill.total_cost_aud or 0.0)
         self.bill_status = {"at": now.isoformat(), "error": None, "recorded": [b.date for b in fresh]}
+        await self.morning_summary_job(final=False)
+
+    # ---------------------------------------------------------------- messages
+    def _foxess_client(self):
+        """The FoxESS cloud client behind telemetry, for the overnight history."""
+        inner = getattr(self.telemetry, "inner", None)
+        for candidate in (inner, getattr(inner, "fallback", None)):
+            client = getattr(candidate, "client", None)
+            if client is not None and hasattr(client, "request"):
+                return client
+        return None
+
+    async def _send_evening_plan(self, runner: EveningRunner) -> None:
+        if self.notifier is None or not self.cfg.notify.evening or runner.decision is None:
+            return
+        from .notify import compose_evening
+
+        decision = runner.decision.model_dump(mode="json", exclude={"slots"})
+        title, body, tags = compose_evening(decision, catch_up=self.clock.now() > runner.decision.window_start)
+        await self.notifier.send(title, body, tags=tags)
+
+    async def morning_summary_job(self, final: bool = True) -> None:
+        """Yesterday's summary, once: with GloBird's bill as soon as it is in, or
+        without it at the deadline (then a short follow-up when the bill lands)."""
+        if self.notifier is None:
+            return
+        from .notify import compose_bill_followup, morning_message
+
+        now = self.clock.now()
+        day = (now - timedelta(days=1)).date()
+        key = day.isoformat()
+        state = self.notify_state
+        rate = self.cfg.plan.tariff.super_export_topup_aud_per_kwh
+        try:
+            if state.get("morning_sent") == key:
+                bill = self.ledger.read_bills().get(key)
+                if not state.get("morning_had_bill") and bill and state.get("followup_sent") != key:
+                    title, body, tags = compose_bill_followup(bill, rate)
+                    if await self.notifier.send(title, body, tags=tags):
+                        state.set(followup_sent=key)
+                return
+            if not final and key not in self.ledger.read_bills():
+                return
+            health = [f"Controller {__version__} ({os.environ.get('ZEROHERO_BUILD', 'unknown')})"]
+            if self.bill_status and self.bill_status.get("error"):
+                health.append(f"WARNING GloBird fetch: {self.bill_status['error']}")
+            title, body, tags, had_bill = await morning_message(
+                self.cfg, self.ledger, day, now, foxess_client=self._foxess_client(), health=health)
+            if await self.notifier.send(title, body, tags=tags):
+                state.set(morning_sent=key, morning_had_bill=had_bill)
+        except Exception:  # noqa: BLE001 - a summary must never take the daemon down
+            log.exception("could not send the morning summary")
 
     # ------------------------------------------------------------------- run
     async def start(self) -> None:
@@ -206,6 +265,13 @@ class ZeroHeroScheduler:
                     id=f"globird_{hh:02d}{mm:02d}", max_instances=1, misfire_grace_time=1800,
                 )
             log.info("scheduled GloBird bill fetches at %s", ", ".join(self.cfg.globird.fetch_times))
+
+        if self.notifier is not None:
+            hh, mm = (int(x) for x in self.cfg.notify.morning_deadline.split(":"))
+            sched.add_job(self.morning_summary_job, CronTrigger(hour=hh, minute=mm, timezone=self.cfg.site.tz),
+                          id="morning_summary", max_instances=1, misfire_grace_time=3600)
+            log.info("daily messages on: morning summary by %s%s", self.cfg.notify.morning_deadline,
+                     ", tonight's plan at decision time" if self.cfg.notify.evening else "")
 
         self._stop = asyncio.Event()
         sched.start()

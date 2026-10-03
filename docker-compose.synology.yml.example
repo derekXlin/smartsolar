@@ -46,6 +46,8 @@ services:
       # Optional: GloBird portal login, for fetching the daily costs (globird.enabled).
       # - GLOBIRD_EMAIL=you@example.com
       # - GLOBIRD_PASSWORD=your-portal-password
+      # Optional: ntfy topic for the daily messages (notify.enabled).
+      # - NTFY_TOPIC=a-long-random-name
       - TZ=Australia/Sydney
       - ZEROHERO_API_HOST=0.0.0.0
 

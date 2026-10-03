@@ -49,6 +49,21 @@ class Ledger:
         payload["slot_count"] = len(decision.slots)
         self._append(self.decision_path, payload)
 
+    def read_decisions(self, window_date: date) -> list[dict[str, Any]]:
+        """Decisions for the window on ``window_date``, oldest first (the 17:50 one,
+        then any catch-up after a restart)."""
+        if not self.decision_path.exists():
+            return []
+        out = []
+        for line in self.decision_path.read_text(encoding="utf-8").splitlines():
+            try:
+                raw = json.loads(line)
+            except ValueError:
+                continue
+            if str(raw.get("window_start", ""))[:10] == window_date.isoformat():
+                out.append(raw)
+        return out
+
     def record_sample(self, telemetry: Telemetry, setpoint_kw: float, note: str = "",
                       mode: str | None = None) -> None:
         if self.samples_path is None:

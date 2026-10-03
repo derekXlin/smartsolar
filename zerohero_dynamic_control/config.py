@@ -475,6 +475,27 @@ class GloBirdConfig(BaseModel):
         return v
 
 
+class NotifyConfig(BaseModel):
+    """Daily ntfy push messages. The topic comes from NTFY_TOPIC in .env: anyone who
+    knows it can read the messages, so it is a secret, not a setting."""
+
+    enabled: bool = False
+    server: str = "https://ntfy.sh"
+    morning_deadline: str = "11:00"
+    """Send yesterday's summary by this time even if GloBird has not published the
+    day yet (bill marked pending; a follow-up carries it when it lands)."""
+    evening: bool = True
+    """Also send tonight's plan right after the 17:50 decision."""
+
+    @field_validator("morning_deadline")
+    @classmethod
+    def _valid_time(cls, v: str) -> str:
+        hh, _, mm = v.partition(":")
+        if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
+            raise ValueError(f"notify.morning_deadline: {v!r} is not HH:MM")
+        return v
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     ledger_path: Path = Path("var/ledger.jsonl")
@@ -509,6 +530,7 @@ class AppConfig(BaseModel):
     controller: ControllerConfig = Field(default_factory=ControllerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     globird: GloBirdConfig = Field(default_factory=GloBirdConfig)
+    notify: NotifyConfig = Field(default_factory=NotifyConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     simulation: SimulationConfig = Field(default_factory=SimulationConfig)
 
