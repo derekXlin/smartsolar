@@ -151,6 +151,29 @@ class ZeroHeroScheduler:
         self.bill_status = {"at": now.isoformat(), "error": None, "recorded": [b.date for b in fresh]}
         await self.morning_summary_job(final=False)
 
+    async def overnight_record_job(self) -> None:
+        """Record last night's battery curve (one FoxESS history call). The evening
+        plan learns its drain rate from these records."""
+        from .overnight import fetch_night
+
+        client = self._foxess_client()
+        sn = self.cfg.providers.foxess.serial_number
+        if client is None or not sn:
+            return
+        day = (self.clock.now() - timedelta(days=1)).date()
+        try:
+            rec = await fetch_night(client, sn, day, capacity_kwh=self.cfg.battery.usable_capacity_kwh,
+                                    tz=self.cfg.site.tz)
+        except Exception:  # noqa: BLE001 - learning data; never take the daemon down
+            log.exception("could not record last night's battery curve")
+            return
+        if rec is None:
+            log.warning("FoxESS history did not cover the night of %s; not recorded", day)
+            return
+        self.ledger.record_overnight(rec)
+        log.info("night of %s: %.0f%% -> low %.0f%% at %s, drain %.2f kWh/h, bought %.2f kWh",
+                 rec.date, rec.soc_21, rec.low_soc, rec.low_at, rec.drain_kwh_per_h, rec.import_kwh)
+
     # ---------------------------------------------------------------- messages
     def _foxess_client(self):
         """The FoxESS cloud client behind telemetry, for the overnight history."""
@@ -265,6 +288,10 @@ class ZeroHeroScheduler:
                     id=f"globird_{hh:02d}{mm:02d}", max_instances=1, misfire_grace_time=1800,
                 )
             log.info("scheduled GloBird bill fetches at %s", ", ".join(self.cfg.globird.fetch_times))
+
+        if self.cfg.providers.battery == "foxess":
+            sched.add_job(self.overnight_record_job, CronTrigger(hour=14, minute=10, timezone=self.cfg.site.tz),
+                          id="overnight_record", max_instances=1, misfire_grace_time=3600)
 
         if self.notifier is not None:
             hh, mm = (int(x) for x in self.cfg.notify.morning_deadline.split(":"))

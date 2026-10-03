@@ -256,6 +256,14 @@ class StrategyConfig(BaseModel):
     in summer, near zero in mid-winter. Used by the ECONOMIC objective to work out how
     full the pack will already be when free charging starts."""
 
+    weather_aware_overnight: bool = True
+    """With objective=retain_overnight: size the night from the battery's learned
+    drain and tomorrow morning's solar forecast (overnight.py), protecting the
+    sunrise low point, instead of overnight_load_kw for every hour to 11:00."""
+
+    overnight_learn_days: int = Field(7, ge=1, le=60)
+    """Nights of history the drain rate is learned from (needs 3)."""
+
     catch_up_on_start: bool = True
     """If the process starts while the credit window is already open, run it for
     the remaining time instead of waiting for tomorrow.

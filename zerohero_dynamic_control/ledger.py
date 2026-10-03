@@ -134,6 +134,24 @@ class Ledger:
                 out[bill.date] = bill
         return out
 
+    def record_overnight(self, record: Any) -> None:
+        self._append(self.outcome_path, {"kind": "overnight", **record.model_dump(mode="json")})
+
+    def read_overnights(self) -> list[Any]:
+        """Latest record per night, oldest first."""
+        from .overnight import OvernightRecord
+
+        out: dict[str, Any] = {}
+        for raw in self._read_rows():
+            if raw.get("kind") == "overnight":
+                try:
+                    rec = OvernightRecord.model_validate(raw)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("skipping malformed overnight row: %s", exc)
+                    continue
+                out[rec.date] = rec
+        return [out[d] for d in sorted(out)]
+
     def record_free_window(self, outcome: FreeWindowOutcome) -> None:
         self._append(self.outcome_path, {"kind": "free_window", **outcome.model_dump(mode="json")})
 

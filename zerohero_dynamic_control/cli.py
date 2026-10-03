@@ -387,6 +387,48 @@ def notify_preview(
         console.print("[green]sent[/]" if asyncio.run(ntfy.send(title, body, tags=tags)) else "[red]not sent[/]")
 
 
+@app.command("overnight-backfill")
+def overnight_backfill(
+    config: Path | None = ConfigOpt,
+    days: int = typer.Option(7, help="How many past nights to record"),
+) -> None:
+    """Record the last N nights' battery curves from FoxESS history (one call each)."""
+    from datetime import datetime, timedelta
+
+    from .ledger import Ledger
+    from .overnight import fetch_night
+
+    cfg = _load(config, "WARNING")
+    client = _foxess_history_client(cfg)
+    sn = cfg.providers.foxess.serial_number
+    if client is None or not sn:
+        console.print("[red]needs providers.battery=foxess with an API key and serial[/]")
+        raise typer.Exit(1)
+    ledger = Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path)
+    today = datetime.now(cfg.site.tz).date()
+
+    async def _run():
+        out = []
+        try:
+            for k in range(days, 0, -1):
+                rec = await fetch_night(client, sn, today - timedelta(days=k),
+                                        capacity_kwh=cfg.battery.usable_capacity_kwh, tz=cfg.site.tz)
+                if rec is not None:
+                    ledger.record_overnight(rec)
+                    out.append(rec)
+        finally:
+            await client.aclose()
+        return out
+
+    t = Table(title="Nights recorded", header_style="bold")
+    for col in ("night", "21:00", "04:00", "drain kWh/h", "low", "11:00", "bought", "full by"):
+        t.add_column(col, justify="right" if col != "night" else "left")
+    for r in asyncio.run(_run()):
+        t.add_row(r.date, f"{r.soc_21:.0f}%", f"{r.soc_04:.0f}%", f"{r.drain_kwh_per_h:.2f}",
+                  f"{r.low_soc:.0f}% {r.low_at}", f"{r.soc_11:.0f}%", f"{r.import_kwh:.2f}", r.full_at or "-")
+    console.print(t)
+
+
 @app.command()
 def run(config: Path | None = ConfigOpt, log_level: str = typer.Option("INFO", "--log-level")) -> None:
     """Start the scheduler daemon."""

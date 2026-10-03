@@ -84,6 +84,7 @@ class EveningRunner:
         self.last_setpoint_kw = 0.0
         self.degraded = False
         self.status_note = "idle"
+        self._overnight: tuple[float, str] | None = None
 
     # ------------------------------------------------------------- forecasting
     async def _curves(self, start: datetime, end: datetime) -> tuple[KwAt, KwAt, bool]:
@@ -150,6 +151,7 @@ class EveningRunner:
         if load_note:
             notes.append(load_note)
 
+        self._overnight = await self._overnight_need(window_end)
         decision = self.engine.plan(
             now=now,
             telemetry=tel,
@@ -158,6 +160,8 @@ class EveningRunner:
             degraded=self.degraded,
             notes=notes,
             morning_solar_to_battery_kwh=await self._morning_solar_estimate(window_end),
+            overnight_need_kwh=self._overnight[0] if self._overnight else None,
+            overnight_note=self._overnight[1] if self._overnight else None,
         )
         decision.telemetry_assumed = telemetry_assumed
         self.decision = decision
@@ -234,6 +238,44 @@ class EveningRunner:
             if command.timestamp <= when:
                 return command.mode
         return None
+
+    async def _overnight_need(self, window_end: datetime) -> tuple[float, str] | None:
+        """Battery energy the night will take, from learned drain and tomorrow's sun.
+
+        None (the fixed overnight_load_kw estimate applies) unless the objective is
+        retain_overnight with weather_aware_overnight on.
+        """
+        from .models import ObjectiveMode
+        from .overnight import learned_drain, overnight_need
+
+        strategy = self.cfg.strategy
+        if not strategy.weather_aware_overnight or strategy.objective is not ObjectiveMode.RETAIN_OVERNIGHT:
+            return None
+        learned = None
+        if self.ledger is not None:
+            learned = learned_drain(self.ledger.read_overnights(), before=window_end.date(),
+                                    days=strategy.overnight_learn_days)
+        if learned:
+            rate, nights = learned
+            source = f"learned from {nights} nights"
+        else:
+            rate = strategy.overnight_load_kw / self.cfg.battery.discharge_efficiency
+            source = "assumed: not enough history yet"
+        free = window_end.replace(hour=self.cfg.plan.free_charge_start.hour,
+                                  minute=self.cfg.plan.free_charge_start.minute)
+        if free <= window_end:
+            free += timedelta(days=1)
+        try:
+            pts = await self.forecast.solar(window_end, free)
+            pv = ForecastCurve(pts, "solar_kw") if pts else constant_curve(0.0)
+            sky = "the forecast sun takes over" if pts else "no solar forecast, so assumed none"
+        except Exception as exc:  # noqa: BLE001 - no forecast: assume no morning sun (the safe side)
+            log.warning("morning solar forecast unavailable (%s); assuming none", exc)
+            pv, sky = constant_curve(0.0), "no solar forecast, so assumed none"
+        need, low_at = overnight_need(rate, pv, window_end, free)
+        stop = "the free window" if low_at >= free else f"about {low_at:%H:%M}, when {sky}"
+        return need, (f"holding {need:.1f} kWh for the night: the battery drains ~{rate:.2f} kWh/h "
+                      f"({source}) until {stop}")
 
     async def _morning_solar_estimate(self, window_end: datetime) -> float | None:
         """How much PV will reach the battery between sunrise and the free window.
@@ -514,6 +556,8 @@ class EveningRunner:
                 degraded=degraded or self.degraded,
                 notes=["mid-window replan"],
                 already_exported_kwh=self.exported_kwh,
+                overnight_need_kwh=self._overnight[0] if self._overnight else None,
+                overnight_note=self._overnight[1] if self._overnight else None,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("replan failed, keeping the existing plan: %s", exc)

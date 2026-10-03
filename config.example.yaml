@@ -122,6 +122,13 @@ strategy:
   # and the invoice shows only 1.98 kWh/day of PAID import, so the battery is
   # already carrying nearly all of the overnight load.
   overnight_load_kw: 1.4
+  # With objective retain_overnight: size the night from the battery's own drain
+  # (learned from the last overnight_learn_days nights of FoxESS history, needs 3)
+  # and tomorrow morning's solar forecast, so the reserve protects the SUNRISE low
+  # point. A sunny morning stops the drain ~07:00, a dull one runs to 11:00.
+  # overnight_load_kw above is then only the fallback until 3 nights are recorded.
+  weather_aware_overnight: true
+  overnight_learn_days: 7
   # Fallback only: with forecast.provider=open_meteo this is estimated from the
   # real morning forecast each day, which matters because it swings from ~2 kWh
   # in midwinter to ~15 kWh in midsummer.

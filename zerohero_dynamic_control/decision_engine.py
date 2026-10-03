@@ -142,6 +142,8 @@ class DecisionEngine:
         notes: list[str] | None = None,
         morning_solar_to_battery_kwh: float | None = None,
         already_exported_kwh: float = 0.0,
+        overnight_need_kwh: float | None = None,
+        overnight_note: str | None = None,
     ) -> Decision:
         cfg = self.cfg
         rationale: list[str] = list(notes or [])
@@ -199,6 +201,8 @@ class DecisionEngine:
             window_end=window_end,
             risk=risk,
             morning_solar_kwh=morning_solar_to_battery_kwh,
+            overnight_need_kwh=overnight_need_kwh,
+            overnight_note=overnight_note,
         )
         rationale.extend(econ_notes)
 
@@ -405,6 +409,8 @@ class DecisionEngine:
         window_end: datetime,
         risk: RiskLevel,
         morning_solar_kwh: float | None = None,
+        overnight_need_kwh: float | None = None,
+        overnight_note: str | None = None,
     ) -> tuple[float, float, list[str]]:
         """Decide how much AC energy to dedicate to opportunistic export."""
         cfg = self.cfg
@@ -427,11 +433,17 @@ class DecisionEngine:
             return spare_dc_kwh * eff, reserve_kwh, notes
 
         if cfg.strategy.objective is ObjectiveMode.RETAIN_OVERNIGHT:
+            if overnight_need_kwh is not None:
+                # Battery energy to the sunrise low point, from the learned drain and
+                # tomorrow's sun (overnight.py): already in battery terms.
+                overnight_need = overnight_need_kwh
+                notes.append(f"objective=retain_overnight — {overnight_note or f'holding {overnight_need:.1f} kWh for the night'}")
+            else:
+                notes.append(
+                    f"objective=retain_overnight — holding {overnight_need:.1f} kWh for the "
+                    f"{hours:.1f} h until the free window opens"
+                )
             budget_dc = max(0.0, spare_dc_kwh - overnight_need)
-            notes.append(
-                f"objective=retain_overnight — holding {overnight_need:.1f} kWh for the "
-                f"{hours:.1f} h until the free window opens"
-            )
             return budget_dc * eff, reserve_kwh + overnight_need, notes
 
         # ---- ECONOMIC: compare what a kWh is worth kept vs sold ---------------
