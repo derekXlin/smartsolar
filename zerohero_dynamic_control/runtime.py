@@ -85,6 +85,7 @@ class EveningRunner:
         self.degraded = False
         self.status_note = "idle"
         self._overnight: tuple[float, str] | None = None
+        self._overnight_detail: dict | None = None
 
     # ------------------------------------------------------------- forecasting
     async def _curves(self, start: datetime, end: datetime) -> tuple[KwAt, KwAt, bool]:
@@ -164,6 +165,7 @@ class EveningRunner:
             overnight_note=self._overnight[1] if self._overnight else None,
         )
         decision.telemetry_assumed = telemetry_assumed
+        self._predict_sunrise_low(decision)
         self.decision = decision
         self.monitor = CreditMonitor(
             decision.window_start, decision.window_end, self.cfg.plan.import_limit_kwh_per_hour
@@ -273,9 +275,45 @@ class EveningRunner:
             log.warning("morning solar forecast unavailable (%s); assuming none", exc)
             pv, sky = constant_curve(0.0), "no solar forecast, so assumed none"
         need, low_at = overnight_need(rate, pv, window_end, free)
+        self._overnight_detail = {"need": need, "low_at": low_at,
+                                  "models": await self._model_needs(rate, window_end, free)}
         stop = "the free window" if low_at >= free else f"about {low_at:%H:%M}, when {sky}"
         return need, (f"holding {need:.1f} kWh for the night: the battery drains ~{rate:.2f} kWh/h "
                       f"({source}) until {stop}")
+
+    async def _model_needs(self, rate: float, start: datetime, end: datetime) -> dict[str, float]:
+        """The night's need under each other weather model: how wrong could the forecast be?"""
+        from .overnight import model_pv_curves, overnight_need
+
+        models = self.cfg.strategy.forecast_check_models
+        if not models or self.cfg.forecast.provider != "open_meteo":
+            return {}
+        try:
+            curves = await model_pv_curves(self.cfg, start, end, models)
+        except Exception as exc:  # noqa: BLE001 - a missing cross-check never blocks the plan
+            log.warning("weather model cross-check unavailable: %s", exc)
+            return {}
+        return {name: overnight_need(rate, curve, start, end)[0] for name, curve in curves.items()}
+
+    def _predict_sunrise_low(self, decision: Decision) -> None:
+        """Where tonight's plan leaves the battery at sunrise, per forecast."""
+        detail = self._overnight_detail
+        if not detail:
+            return
+        cap = self.cfg.battery.usable_capacity_kwh
+        decision.overnight_low_soc = round(decision.expected_final_soc - detail["need"] / cap * 100, 1)
+        decision.overnight_low_at = detail["low_at"]
+        decision.overnight_model_lows = {
+            name: round(decision.expected_final_soc - need / cap * 100, 1)
+            for name, need in detail["models"].items()
+        }
+        if decision.overnight_model_lows:
+            worst = min(decision.overnight_model_lows, key=decision.overnight_model_lows.get)
+            decision.rationale.append(
+                f"sunrise low ~{decision.overnight_low_soc:.0f}% at {detail['low_at']:%H:%M}; other weather "
+                f"models: {decision.overnight_model_lows[worst]:.0f}% ({worst}) to "
+                f"{max(decision.overnight_model_lows.values()):.0f}%"
+            )
 
     async def _morning_solar_estimate(self, window_end: datetime) -> float | None:
         """How much PV will reach the battery between sunrise and the free window.

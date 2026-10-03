@@ -122,3 +122,38 @@ def overnight_need(drain_kwh_per_h: float, pv_kw_at: Any, start: datetime, end: 
         if cum > worst + 1e-9:
             worst, worst_t = cum, t
     return worst, worst_t
+
+
+async def model_pv_curves(cfg: Any, start: datetime, end: datetime, models: list[str]) -> dict[str, Any]:
+    """Tomorrow morning's PV under each weather model, as kW-at-time functions.
+
+    One Open-Meteo request for all models (hourly tilted irradiance; not every
+    model has the 15-minute field). A model that returns nothing is left out.
+    """
+    import httpx
+
+    from .curves import ForecastCurve
+    from .data_providers.open_meteo import ENDPOINT, OpenMeteoForecastProvider
+    from .models import ForecastPoint
+
+    if not models:
+        return {}
+    async with httpx.AsyncClient(timeout=cfg.forecast.timeout_seconds) as client:
+        resp = await client.get(ENDPOINT, params={
+            "latitude": cfg.site.latitude, "longitude": cfg.site.longitude, "timezone": cfg.site.timezone,
+            "hourly": "global_tilted_irradiance", "forecast_days": 2, "models": ",".join(models),
+            "tilt": cfg.forecast.array_tilt_deg, "azimuth": OpenMeteoForecastProvider(cfg)._azimuth(),
+        })
+        resp.raise_for_status()
+        hourly = resp.json().get("hourly", {})
+    times = [datetime.fromisoformat(t).replace(tzinfo=cfg.site.tz) for t in hourly.get("time", [])]
+    rating = cfg.forecast.pv_rating_kw
+    curves = {}
+    for model in models:
+        values = hourly.get(f"global_tilted_irradiance_{model}") or []
+        pts = [ForecastPoint(timestamp=t, solar_kw=min(rating, rating * v / 1000 * 0.88))
+               for t, v in zip(times, values, strict=False)
+               if v is not None and start - timedelta(hours=1) <= t <= end + timedelta(hours=1)]
+        if len(pts) >= 4:
+            curves[model] = ForecastCurve(pts, "solar_kw")
+    return curves

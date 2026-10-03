@@ -100,6 +100,10 @@ def control_line(decision: dict[str, Any] | None) -> str | None:
     return None
 
 
+RISK_MARGIN_PCT = 2.0
+"""Warn at 17:50 when any weather model puts the sunrise low within this many SOC
+points of the floor."""
+
 BULLET = "• "
 SUB = "    ◦ "
 
@@ -188,7 +192,8 @@ def compose_morning(
     return title, bulleted(items), tags
 
 
-def compose_evening(decision: dict[str, Any], *, catch_up: bool) -> tuple[str, str, list[str]]:
+def compose_evening(decision: dict[str, Any], *, catch_up: bool,
+                    floor_soc: float | None = None) -> tuple[str, str, list[str], int]:
     sell = decision.get("opportunistic_export_kwh") or 0.0
     title = f"Tonight: sell {sell:.1f} kWh" if sell >= 0.05 else "Tonight: self-use, nothing to sell"
     items: list[tuple[str, list[str]]] = [
@@ -202,6 +207,21 @@ def compose_evening(decision: dict[str, Any], *, catch_up: bool) -> tuple[str, s
             head, _, hours = line.partition(": ")
             items.append((head.replace("load learned from", "Load forecast from"), [hours]))
     tags = ["battery"]
+    priority = 3
+    low = decision.get("overnight_low_soc")
+    if low is not None:
+        low_at = str(decision.get("overnight_low_at") or "")[11:16]
+        items.append((f"Predicted sunrise low ~{low:.0f}%" + (f" at ~{low_at}" if low_at else ""), []))
+    models = decision.get("overnight_model_lows") or {}
+    if models and floor_soc is not None:
+        worst = min(models, key=models.get)
+        if models[worst] < floor_soc + RISK_MARGIN_PCT:
+            items.append((
+                "FORECAST RISK: weather models disagree about tomorrow morning",
+                [f"if {worst} is right, the battery bottoms at ~{models[worst]:.0f}% (floor {floor_soc:.0f}%)",
+                 "it may buy from the grid before 11:00; you will get a live alert if it happens"],
+            ))
+            tags, priority = ["warning"], 4
     if not decision.get("credit_achievable", True):
         items.append(("WARNING: the credit is not winnable tonight", ["self-use, to protect the battery"]))
         tags = ["warning"]
@@ -210,7 +230,7 @@ def compose_evening(decision: dict[str, Any], *, catch_up: bool) -> tuple[str, s
         tags = ["warning"]
     elif decision.get("degraded"):
         items.append(("Note: forecast unavailable", ["fallback curves used"]))
-    return title, bulleted(items), tags
+    return title, bulleted(items), tags, priority
 
 
 # ------------------------------------------------------------- overnight stats
@@ -274,3 +294,25 @@ def compose_bill_followup(bill: BillRecord, topup_rate: float) -> tuple[str, str
     if bill.super_export_topup_aud is not None and topup_rate > 0:
         items.append((f"sold {-bill.super_export_topup_aud / topup_rate:.1f} kWh", []))
     return title, bulleted(items), ["white_check_mark"] if bill.credit_paid else ["x"]
+
+
+def compose_below_reserve(soc: float, at: datetime, reserve: float, predicted: float | None,
+                          predicted_at: str | None) -> tuple[str, str, list[str]]:
+    title = f"Battery {soc:.0f}% at {at:%H:%M}: below the {reserve:.0f}% reserve"
+    items = []
+    if predicted is not None:
+        items.append((f"last night's plan expected a low of ~{predicted:.0f}%"
+                      + (f" at ~{predicted_at}" if predicted_at else ""), []))
+    items.append(("the house will buy from the grid if it reaches the floor before 11:00", []))
+    items.append(("worth checking whether the reserve or the forecast needs adjusting", []))
+    return title, bulleted(items), ["warning"]
+
+
+def compose_forecast_missed(soc: float, at: datetime, expected_at: str, projected_11: float,
+                            floor: float, buy_kwh: float) -> tuple[str, str, list[str]]:
+    title = f"Forecast missed: battery still falling at {at:%H:%M} ({soc:.0f}%)"
+    items = [(f"the sun was expected to take over at ~{expected_at}", []),
+             (f"at this rate ~{projected_11:.0f}% by 11:00 (floor {floor:.0f}%)", [])]
+    if buy_kwh > 0.05:
+        items.append((f"may buy ~{buy_kwh:.1f} kWh from the grid before the free window", []))
+    return title, bulleted(items), ["cloud", "warning"]

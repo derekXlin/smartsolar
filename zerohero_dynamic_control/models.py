@@ -217,6 +217,13 @@ class Decision(BaseModel):
     telemetry_assumed: bool = False
     """True when SOC could NOT be read and a stand-in value was used. Every number
     in this decision is then a guess about the battery, not a measurement."""
+    overnight_low_soc: float | None = None
+    """Predicted SOC at tomorrow's sunrise low, after tonight's sale (weather-aware
+    planning only)."""
+    overnight_low_at: datetime | None = None
+    overnight_model_lows: dict[str, float] = Field(default_factory=dict)
+    """The same low under each other weather model checked. Their spread is the
+    chance the forecast is missed."""
     rationale: list[str] = Field(default_factory=list)
     inputs: dict[str, Any] = Field(default_factory=dict)
 

@@ -144,3 +144,18 @@ async def test_the_runner_learns_from_the_ledger_and_falls_back_safely(tmp_path)
 
     cfg.strategy.weather_aware_overnight = False
     assert await runner._overnight_need(window_end) is None
+
+
+def test_the_decision_records_the_sunrise_low_per_forecast():
+    from .test_runtime import BoomForecast, BoomTelemetry, build_runner
+
+    cfg = AppConfig()
+    runner = build_runner(cfg, BoomTelemetry(), BoomForecast(), datetime(2026, 10, 3, 17, 50, tzinfo=TZ))
+    runner._overnight_detail = {"need": 19.0, "low_at": datetime(2026, 10, 4, 8, 0, tzinfo=TZ),
+                                "models": {"ecmwf_ifs025": 19.5, "gfs_seamless": 23.0}}
+    from zerohero_dynamic_control.models import Decision
+    d = Decision.model_construct(expected_final_soc=59.0, rationale=[])
+    runner._predict_sunrise_low(d)
+    assert d.overnight_low_soc == pytest.approx(59.0 - 19.0 / 47 * 100, abs=0.1)
+    assert d.overnight_model_lows["gfs_seamless"] == pytest.approx(59.0 - 23.0 / 47 * 100, abs=0.1)
+    assert any("other weather models" in r for r in d.rationale)

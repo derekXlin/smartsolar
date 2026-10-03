@@ -264,6 +264,11 @@ class StrategyConfig(BaseModel):
     overnight_learn_days: int = Field(7, ge=1, le=60)
     """Nights of history the drain rate is learned from (needs 3)."""
 
+    forecast_check_models: list[str] = Field(
+        default_factory=lambda: ["ecmwf_ifs025", "gfs_seamless", "icon_seamless", "gem_seamless"])
+    """Other Open-Meteo weather models to predict the sunrise low with. When one of
+    them puts the battery near the floor, the 17:50 message warns. Empty: off."""
+
     catch_up_on_start: bool = True
     """If the process starts while the credit window is already open, run it for
     the remaining time instead of waiting for tomorrow.

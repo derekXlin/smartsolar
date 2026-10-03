@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 import signal
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from . import __version__
 from .clock import RealClock
@@ -52,6 +52,7 @@ class ZeroHeroScheduler:
         if cfg.notify.enabled and self.notifier is None:
             log.error("notify.enabled is set but NTFY_TOPIC is not; no messages will be sent")
         self.notify_state = NotifyState(cfg.logging.ledger_path.parent / "notify_state.json")
+        self._watch_prev: tuple[datetime, float, str] | None = None
         self.assurance: FreeChargeAssurance | None = None
         self._stop: asyncio.Event | None = None
         self._scheduler = None
@@ -171,8 +172,73 @@ class ZeroHeroScheduler:
             log.warning("FoxESS history did not cover the night of %s; not recorded", day)
             return
         self.ledger.record_overnight(rec)
+        await self._alert_below_reserve_after_the_fact(rec)
         log.info("night of %s: %.0f%% -> low %.0f%% at %s, drain %.2f kWh/h, bought %.2f kWh",
                  rec.date, rec.soc_21, rec.low_soc, rec.low_at, rec.drain_kwh_per_h, rec.import_kwh)
+
+    async def overnight_watch_job(self) -> None:
+        """Every 30 minutes from 05:00 to 10:30: is the night going as planned?
+
+        Two alerts, each at most once a night: the battery under the reserve, and
+        the forecast missed (still falling 45 minutes after the sun was due, on
+        course to end under the reserve by the free window).
+        """
+        if self.notifier is None:
+            return
+        from .notify import compose_below_reserve, compose_forecast_missed
+
+        now = self.clock.now()
+        night = (now - timedelta(days=1)).date()
+        key = night.isoformat()
+        try:
+            tel = await self.telemetry.read(now)
+        except Exception as exc:  # noqa: BLE001 - no reading, no alert; try again in 30 minutes
+            log.warning("overnight watch: no battery reading (%s)", exc)
+            return
+        soc = tel.soc_pct
+        prev = self._watch_prev if self._watch_prev and self._watch_prev[2] == key else None
+        self._watch_prev = (now, soc, key)
+        decisions = self.ledger.read_decisions(night)
+        decision = decisions[0] if decisions else {}
+        predicted = decision.get("overnight_low_soc")
+        predicted_at = str(decision.get("overnight_low_at") or "")[11:16] or None
+        reserve = self.cfg.battery.min_reserve_soc_pct
+        floor = self.cfg.battery.emergency_floor_soc_pct
+        state = self.notify_state
+        try:
+            if soc < reserve and state.get("below_reserve_alert") != key:
+                title, body, tags = compose_below_reserve(soc, now, reserve, predicted, predicted_at)
+                if await self.notifier.send(title, body, tags=tags, priority=4):
+                    state.set(below_reserve_alert=key)
+            if predicted_at and prev and state.get("forecast_miss_alert") != key:
+                expected = datetime.combine(now.date(), time.fromisoformat(predicted_at), tzinfo=now.tzinfo)
+                hours = (now - prev[0]).total_seconds() / 3600
+                if now >= expected + timedelta(minutes=45) and hours > 0 and soc < prev[1] - 0.5:
+                    rate = (prev[1] - soc) / hours
+                    free = now.replace(hour=self.cfg.plan.free_charge_start.hour,
+                                       minute=self.cfg.plan.free_charge_start.minute, second=0, microsecond=0)
+                    projected = soc - rate * max(0.0, (free - now).total_seconds() / 3600)
+                    if projected < reserve:
+                        buy = max(0.0, floor - projected) / 100 * self.cfg.battery.usable_capacity_kwh
+                        title, body, tags = compose_forecast_missed(soc, now, predicted_at, projected, floor, buy)
+                        if await self.notifier.send(title, body, tags=tags, priority=4):
+                            state.set(forecast_miss_alert=key)
+        except Exception:  # noqa: BLE001 - an alert must never take the daemon down
+            log.exception("overnight watch failed")
+
+    async def _alert_below_reserve_after_the_fact(self, rec) -> None:
+        """Backstop: the recorded night went under the reserve and no live alert caught it."""
+        reserve = self.cfg.battery.min_reserve_soc_pct
+        if self.notifier is None or rec.low_soc >= reserve or self.notify_state.get("below_reserve_alert") == rec.date:
+            return
+        from .notify import bulleted
+
+        day = datetime.fromisoformat(rec.date).strftime("%a %d %b")
+        title = f"Night of {day}: battery fell to {rec.low_soc:.0f}% at {rec.low_at} (reserve {reserve:.0f}%)"
+        body = bulleted([(f"bought {rec.import_kwh:.2f} kWh from the grid before 11:00", []),
+                         ("worth checking whether the reserve or the forecast needs adjusting", [])])
+        if await self.notifier.send(title, body, tags=["warning"], priority=4):
+            self.notify_state.set(below_reserve_alert=rec.date)
 
     # ---------------------------------------------------------------- messages
     def _foxess_client(self):
@@ -190,8 +256,10 @@ class ZeroHeroScheduler:
         from .notify import compose_evening
 
         decision = runner.decision.model_dump(mode="json", exclude={"slots"})
-        title, body, tags = compose_evening(decision, catch_up=self.clock.now() > runner.decision.window_start)
-        await self.notifier.send(title, body, tags=tags)
+        title, body, tags, priority = compose_evening(
+            decision, catch_up=self.clock.now() > runner.decision.window_start,
+            floor_soc=self.cfg.battery.emergency_floor_soc_pct)
+        await self.notifier.send(title, body, tags=tags, priority=priority)
 
     async def morning_summary_job(self, final: bool = True) -> None:
         """Yesterday's summary, once: with GloBird's bill as soon as it is in, or
@@ -294,6 +362,8 @@ class ZeroHeroScheduler:
                           id="overnight_record", max_instances=1, misfire_grace_time=3600)
 
         if self.notifier is not None:
+            sched.add_job(self.overnight_watch_job, CronTrigger(hour="5-10", minute="0,30", timezone=self.cfg.site.tz),
+                          id="overnight_watch", max_instances=1, misfire_grace_time=600)
             hh, mm = (int(x) for x in self.cfg.notify.morning_deadline.split(":"))
             sched.add_job(self.morning_summary_job, CronTrigger(hour=hh, minute=mm, timezone=self.cfg.site.tz),
                           id="morning_summary", max_instances=1, misfire_grace_time=3600)
