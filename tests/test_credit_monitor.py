@@ -157,8 +157,65 @@ def test_report_labels_uncertain_hours_as_estimates():
     m = CreditMonitor(START, END)
     m.buckets[START].imported_kwh = 0.061
     m.buckets[START + timedelta(hours=1)].imported_kwh = 0.165
+    m.buckets[START + timedelta(hours=1)].confirmed_import_kwh = 0.165
     report = m.report()
-    assert "OVER? (estimate" in report and "BREACH" in report
+    assert "18:00   61.0 Wh  OVER? (0 Wh confirmed" in report and "19:00  165.0 Wh  BREACH" in report
+
+
+# ----------------------------------------------- the mode decides, not the size
+def _evening(readings):
+    """readings: (minute after 18:00, grid kW, forced) at 5-minute snapshots."""
+    m = CreditMonitor(START, END)
+    for minute in range(0, 180, 5):
+        kw, forced = readings.get(minute, (-0.01, False))
+        m.observe(START + timedelta(minutes=minute), kw, forced=forced)
+    return m
+
+
+def test_one_self_use_spike_is_not_a_confirmed_breach():
+    """1 Oct 18:49:50: one reading of 1.29 kW in self-use, the readings either side
+    ~0. Estimated ~110 Wh; GloBird paid the credit."""
+    m = _evening({50: (1.294, False), 55: (0.044, False)})
+    h18 = m.buckets[START]
+    assert h18.imported_kwh > 0.09 and h18.breached
+    assert h18.confirmed_import_kwh == pytest.approx(0.0)
+    assert not h18.clearly_breached
+
+
+def test_one_force_discharge_spike_is_a_confirmed_breach():
+    """27 Sep 18:50: one reading of 1.9 kW while force-discharging at a fixed 2 kW.
+    The inverter cannot close that gap itself; the credit was lost."""
+    m = _evening({50: (1.914, True), 55: (-0.1, True)})
+    assert m.buckets[START].clearly_breached
+
+
+def test_sustained_self_use_import_is_a_confirmed_breach():
+    """Self-use import that persists across readings is real, e.g. the battery
+    reaching its floor mid-window."""
+    m = _evening({k: (0.3, False) for k in range(60, 120, 5)})
+    assert m.buckets[START + timedelta(hours=1)].clearly_breached
+
+
+def test_self_use_residual_trickle_is_confirmed_only_when_sustained_above_threshold():
+    """10-40 W of self-use residual in consecutive readings is regulation noise,
+    and is what passing evenings show; 50 W or more in a row is a real draw."""
+    quiet = _evening({k: (0.03, False) for k in range(0, 180, 5)})
+    assert all(b.confirmed_import_kwh == pytest.approx(0.0) for b in quiet.buckets.values())
+
+
+def test_samples_without_a_mode_take_it_from_the_note(tmp_path):
+    from zerohero_dynamic_control.ledger import Ledger
+    from zerohero_dynamic_control.models import Telemetry
+
+    ledger = Ledger(tmp_path / "l.jsonl", tmp_path / "d.jsonl", tmp_path / "s.jsonl")
+    tel = Telemetry(timestamp=START, soc_pct=80, battery_energy_kwh=37, grid_kw=0.5)
+    ledger.record_sample(tel, 0.0, "self-use: the inverter follows the load itself")
+    ledger.record_sample(tel.model_copy(update={"timestamp": START + timedelta(minutes=1)}), 9.0,
+                         "net +2.0 kW, margin 0.25 kW, export 7.0 kW")
+    ledger.record_sample(tel.model_copy(update={"timestamp": START + timedelta(minutes=2)}), 0.0,
+                         "whatever", mode="self_consumption")
+    forced = [f for _, _, f in ledger.read_samples(START, END)]
+    assert forced == [False, True, False]
 
 
 # ------------------------------------------- measurement time, not poll time

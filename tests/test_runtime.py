@@ -570,3 +570,20 @@ async def test_window_bounded_controllers_are_prearmed_at_decision_time():
         assert bool(early) is expect
         if expect:
             assert early[0].mode is BatteryMode.FORCE_EXPORT and early[0].power_kw == pytest.approx(9.75)
+
+
+
+def test_the_mode_at_a_reading_comes_from_the_command_log():
+    """A reading is judged by the mode we had commanded when it was MEASURED."""
+    from zerohero_dynamic_control.models import ControlCommand
+
+    cfg = AppConfig()
+    t = datetime(2026, 10, 1, 18, 0, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(), BoomForecast(), t)
+    assert runner._mode_at(t) is None, "nothing commanded yet"
+    runner.controller.command_log.append(
+        ControlCommand(timestamp=t - timedelta(minutes=10), mode=BatteryMode.FORCE_EXPORT, power_kw=10))
+    runner.controller.command_log.append(
+        ControlCommand(timestamp=t + timedelta(minutes=44), mode=BatteryMode.SELF_CONSUMPTION))
+    assert runner._mode_at(t + timedelta(minutes=40)) is BatteryMode.FORCE_EXPORT
+    assert runner._mode_at(t + timedelta(minutes=49, seconds=50)) is BatteryMode.SELF_CONSUMPTION

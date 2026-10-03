@@ -239,9 +239,13 @@ class ControlCommand(BaseModel):
 
 
 BREACH_CERTAINTY_FACTOR = 3.0
-"""How many times the hourly limit an ESTIMATE must reach before the ledger calls
-the credit lost. Between 1x and this, the bill decides. Set from two evenings of
-cloud telemetry (see HourImport.clearly_breached); revisit with more bills."""
+"""Legacy rule, for ledger rows written before 1.4.1 (no confirmed import): call
+the credit lost only at this many times the limit. It misjudged 1 Oct, where one
+self-use reading alone made 112 Wh (3.7x) and GloBird paid the credit."""
+
+SUSTAINED_IMPORT_KW = 0.05
+"""Self-use import counts as confirmed only when two readings in a row show at
+least this much: a sustained draw, not a spike the inverter closed in seconds."""
 
 
 class HourImport(BaseModel):
@@ -250,6 +254,10 @@ class HourImport(BaseModel):
     hour_start: datetime
     imported_kwh: float = 0.0
     limit_kwh: float = 0.03
+    confirmed_import_kwh: float | None = None
+    """The part of the estimate that cannot be a sampling artefact: import while
+    force-discharging, plus self-use import seen in two readings in a row. None on
+    rows written before 1.4.1."""
     observed_minutes: float = 0.0
     """How much of this hour telemetry actually covered. Zero import over an hour
     nobody watched is not evidence of anything."""
@@ -273,15 +281,19 @@ class HourImport(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def clearly_breached(self) -> bool:
-        """Far enough over that estimation error cannot explain it.
+        """Over the limit on import that cannot be a sampling artefact.
 
         The estimate integrates readings the cloud refreshes every ~5 minutes, so
-        a momentary draw the inverter corrects in seconds is counted as five
-        minutes of import. On 28 Sep the 19:00 hour estimated 61 Wh (2x the limit)
-        and GloBird paid the credit; on 27 Sep the 18:00 hour estimated 165 Wh
-        (5.5x) and the credit was lost. The line sits between those two.
+        a momentary draw counts as five minutes of import. Whether that draw was
+        momentary depends on the mode. In self-use the inverter closes a gap from
+        its own meter in seconds: single-reading spikes of 0.43-1.29 kW (estimated
+        50-112 Wh) on 28 Sep, 29 Sep and 1 Oct all left the credit paid. In
+        force-discharge the gap stays until the loop reacts, minutes later: one
+        1.9 kW reading (165 Wh) on 27 Sep, and the credit was lost.
         """
-        return self.imported_kwh >= BREACH_CERTAINTY_FACTOR * self.limit_kwh
+        if self.confirmed_import_kwh is None:
+            return self.imported_kwh >= BREACH_CERTAINTY_FACTOR * self.limit_kwh
+        return self.confirmed_import_kwh >= self.limit_kwh - 1e-9
 
     @computed_field  # type: ignore[prop-decorator]
     @property

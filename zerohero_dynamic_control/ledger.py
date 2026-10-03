@@ -49,7 +49,8 @@ class Ledger:
         payload["slot_count"] = len(decision.slots)
         self._append(self.decision_path, payload)
 
-    def record_sample(self, telemetry: Telemetry, setpoint_kw: float, note: str = "") -> None:
+    def record_sample(self, telemetry: Telemetry, setpoint_kw: float, note: str = "",
+                      mode: str | None = None) -> None:
         if self.samples_path is None:
             return
         self._append(
@@ -58,11 +59,19 @@ class Ledger:
                 **telemetry.model_dump(mode="json"),
                 "setpoint_kw": round(setpoint_kw, 3),
                 "note": note,
+                # The mode commanded when the reading was MEASURED; drives whether
+                # its import counts as confirmed on a mid-window replay.
+                **({"mode": mode} if mode else {}),
             },
         )
 
-    def read_samples(self, start: datetime, end: datetime) -> list[tuple[datetime, float]]:
-        """(timestamp, grid_kw) for every sample in [start, end), oldest first."""
+    def read_samples(self, start: datetime, end: datetime) -> list[tuple[datetime, float, bool]]:
+        """(time, grid_kw, forced) for every sample in [start, end), oldest first.
+
+        ``forced``: was the battery force-discharging when the sample was measured.
+        Samples before 1.4.1 carry no mode; the loop's note says which law produced
+        them ("self-use: ..." or a force-discharge reason), and unknown counts as forced.
+        """
         if self.samples_path is None or not self.samples_path.exists():
             return []
         out: list[tuple[datetime, float]] = []
@@ -73,7 +82,10 @@ class Ledger:
                     # Measurement time where the source gave one (since 1.3.3).
                     when = datetime.fromisoformat(raw.get("measured_at") or raw["timestamp"])
                     if start <= when < end:
-                        out.append((when, float(raw["grid_kw"])))
+                        mode = raw.get("mode")
+                        forced = (mode not in ("self_consumption", "hold") if mode
+                                  else not str(raw.get("note", "")).startswith("self-use"))
+                        out.append((when, float(raw["grid_kw"]), forced))
                 except (ValueError, KeyError, TypeError):
                     continue
         out.sort(key=lambda s: s[0])

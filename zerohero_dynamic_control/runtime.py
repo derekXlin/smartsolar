@@ -186,21 +186,22 @@ class EveningRunner:
         if now <= start:
             return
         samples = self.ledger.read_samples(start, now)
-        for when, grid_kw in samples:
-            self._account(when, grid_kw)
+        for when, grid_kw, forced in samples:
+            self._account(when, grid_kw, forced=forced)
         if samples:
             log.warning("resumed mid-window: replayed %d samples from %s to %s | %s",
                         len(samples), samples[0][0].strftime("%H:%M"),
                         samples[-1][0].strftime("%H:%M"), self.monitor.report())
 
-    def _account(self, when: datetime, grid_kw: float) -> None:
+    def _account(self, when: datetime, grid_kw: float, *, forced: bool = True) -> None:
         """Feed one sample into the credit monitor and the export total.
 
         ``when`` is the measurement time. Snapshots measured before the window,
         or polled again, are skipped for the same reasons as in CreditMonitor.
+        ``forced``: was the battery force-discharging when it was measured.
         """
         if self.monitor:
-            self.monitor.observe(when, grid_kw)
+            self.monitor.observe(when, grid_kw, forced=forced)
         if self.decision is not None and when < self.decision.window_start:
             return
         prev = getattr(self, "_last_export_sample", None)
@@ -217,6 +218,15 @@ class EveningRunner:
             self._last_export_sample = (when, export_kw)
         else:
             self._last_export_sample = (when, 0.0)
+
+    def _mode_at(self, when: datetime) -> BatteryMode | None:
+        """The mode we had commanded when a reading was measured. None if nothing
+        had been commanded yet, which the monitor treats as forced: until our first
+        write the owner's schedule is in charge, and it may itself force-discharge."""
+        for command in reversed(self.controller.command_log):
+            if command.timestamp <= when:
+                return command.mode
+        return None
 
     async def _morning_solar_estimate(self, window_end: datetime) -> float | None:
         """How much PV will reach the battery between sunrise and the free window.
@@ -407,7 +417,9 @@ class EveningRunner:
         self.last_telemetry = tel
         if isinstance(self.controller, SafetyWrapper):
             self.controller.observe_soc(tel.soc_pct)
-        self._account(tel.observed_time, tel.grid_kw)
+        measured_mode = self._mode_at(tel.observed_time)
+        self._account(tel.observed_time, tel.grid_kw,
+                      forced=measured_mode not in (BatteryMode.SELF_CONSUMPTION, BatteryMode.HOLD))
 
         mode, reason = self.choose_mode(tel, now)
         if mode is BatteryMode.FORCE_EXPORT:
@@ -434,7 +446,8 @@ class EveningRunner:
         self.last_setpoint_kw = setpoint
         self.status_note = reason
         if self.ledger:
-            self.ledger.record_sample(tel, setpoint, reason)
+            self.ledger.record_sample(tel, setpoint, reason,
+                                      mode=measured_mode.value if measured_mode else None)
         return tel
 
     async def run_window(self) -> DailyOutcome:
