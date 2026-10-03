@@ -587,3 +587,15 @@ def test_the_mode_at_a_reading_comes_from_the_command_log():
         ControlCommand(timestamp=t + timedelta(minutes=44), mode=BatteryMode.SELF_CONSUMPTION))
     assert runner._mode_at(t + timedelta(minutes=40)) is BatteryMode.FORCE_EXPORT
     assert runner._mode_at(t + timedelta(minutes=49, seconds=50)) is BatteryMode.SELF_CONSUMPTION
+
+
+def test_export_counts_from_18_when_the_first_reading_arrives_at_18_05():
+    """2 Oct: the controller counted 2.1 kWh sold, GloBird 3.0. The first in-window
+    snapshot was measured at 18:04:50; the battery had been exporting since 18:00."""
+    cfg = AppConfig()
+    start = datetime(2026, 10, 2, 18, 0, tzinfo=TZ)
+    runner = build_runner(cfg, BoomTelemetry(), BoomForecast(), start)
+    runner.decision = _decision_with_export(cfg, start, {0: 7.5})
+    runner._account(start - timedelta(seconds=10), 0.03, forced=False)      # 17:59:50, ignored
+    runner._account(start + timedelta(minutes=4, seconds=50), -7.8)
+    assert runner.exported_kwh == pytest.approx(7.8 * (4 + 50 / 60) / 60)

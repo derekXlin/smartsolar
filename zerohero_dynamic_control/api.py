@@ -61,7 +61,17 @@ def build_app(scheduler: ZeroHeroScheduler) -> Any:
 
     @app.get("/ledger")
     async def ledger(limit: int = 14) -> list[dict]:
-        return [o.model_dump(mode="json", exclude={"decision"}) for o in scheduler.ledger.read_outcomes(limit)]
+        from .ledger import verdict_of
+
+        bills = scheduler.ledger.read_bills()
+        out = []
+        for o in scheduler.ledger.read_outcomes(limit):
+            bill = bills.get(o.date)
+            row = o.model_dump(mode="json", exclude={"decision"})
+            row["verdict"] = verdict_of(o, bill)
+            row["bill"] = bill.model_dump(mode="json") if bill else None
+            out.append(row)
+        return out
 
     @app.get("/economics")
     async def economics() -> dict:

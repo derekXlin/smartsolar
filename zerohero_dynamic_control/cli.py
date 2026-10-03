@@ -189,39 +189,83 @@ def ledger(
     config: Path | None = ConfigOpt,
     limit: int = typer.Option(14, help="How many days to show"),
 ) -> None:
-    """Show recent daily outcomes."""
+    """Show recent daily outcomes. GloBird's figures replace estimates where recorded."""
     from .ledger import Ledger, verdict_of
 
     cfg = _load(config, "WARNING")
-    rows = Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path).read_outcomes(limit)
+    book = Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path)
+    rows = book.read_outcomes(limit)
+    bills = book.read_bills()
     if not rows:
         console.print("[yellow]no ledger entries yet[/]")
         raise typer.Exit()
     t = Table(title=f"Last {len(rows)} days", header_style="bold")
-    for col in ("date", "exported", "import", "final SOC", "$1", "net $"):
+    for col in ("date", "sold kWh", "import", "final SOC", "$1", "day $"):
         t.add_column(col, justify="right" if col != "date" else "left")
     shown = {"SECURED": "[green]YES[/]", "MISSED": "[red]NO[/]", "UNVERIFIED": "[yellow]?[/]",
              "CHECK BILL": "[yellow]check bill[/]"}
     counts = {v: 0 for v in shown}
     credit = cfg.plan.daily_credit_aud
+    topup_rate = cfg.plan.tariff.super_export_topup_aud_per_kwh
+    from_bill = 0
     for r in rows:
-        verdict = verdict_of(r)
+        bill = bills.get(r.date)
+        verdict = verdict_of(r, bill)
         counts[verdict] += 1
-        # The stored net assumes no credit unless SECURED. Where the bill decides,
-        # show it as if paid and flag it, rather than booking a loss nobody saw.
-        unknown = verdict in ("CHECK BILL", "UNVERIFIED")
-        net = r.estimated_revenue_aud - credit if unknown else r.estimated_revenue_aud
-        t.add_row(r.date, f"{r.exported_kwh:.2f}", f"{r.imported_kwh * 1000:.0f} Wh",
-                  f"{r.final_soc_pct:.0f}%", shown[verdict], f"{net:.2f}" + ("*" if unknown else ""))
+        sold = f"{r.exported_kwh:.2f}"
+        if bill is not None:
+            from_bill += 1
+            if bill.super_export_topup_aud is not None and topup_rate > 0:
+                sold = f"{-bill.super_export_topup_aud / topup_rate:.2f} b"
+            day = f"{bill.total_cost_aud:.2f} b" if bill.total_cost_aud is not None else "-"
+            credit_cell = shown[verdict] + " b"
+        else:
+            # The stored net assumes no credit unless SECURED. Where the bill decides,
+            # show it as if paid and flag it, rather than booking a loss nobody saw.
+            unknown = verdict in ("CHECK BILL", "UNVERIFIED")
+            net = r.estimated_revenue_aud - credit if unknown else r.estimated_revenue_aud
+            day = f"{net:.2f}" + ("*" if unknown else "")
+            credit_cell = shown[verdict]
+        t.add_row(r.date, sold, f"{r.imported_kwh * 1000:.0f} Wh", f"{r.final_soc_pct:.0f}%", credit_cell, day)
     console.print(t)
     console.print(
         f"secured {counts['SECURED']}, check bill {counts['CHECK BILL']}, "
         f"unverified {counts['UNVERIFIED']}, missed {counts['MISSED']} "
         f"(${counts['MISSED'] * credit:.2f} lost on missed days)"
+        + (f" — {from_bill} of {len(rows)} days from GloBird's bill" if from_bill else "")
     )
-    if counts["CHECK BILL"] or counts["UNVERIFIED"]:
-        console.print("[dim]* assumes the credit was paid; GloBird's bill decides. "
-                      "net $ is the controller's estimate, not the bill.[/]")
+    console.print("[dim]b = GloBird's bill (`zerohero bill`); other figures are the controller's "
+                  "estimates. * assumes the credit was paid.[/]")
+
+
+@app.command()
+def bill(
+    date: str = typer.Argument(..., help="Day of the bill, YYYY-MM-DD"),
+    paid: bool = typer.Option(..., "--paid/--not-paid", help="Was the ZEROHERO credit paid?"),
+    total: float | None = typer.Option(None, help="Total cost for the day, $ (negative = earned)"),
+    usage: float | None = typer.Option(None, help="USAGE line, $"),
+    solar: float | None = typer.Option(None, help="SOLAR line, $ (negative)"),
+    topup: float | None = typer.Option(None, help="Super Export top up line, $ (negative)"),
+    config: Path | None = ConfigOpt,
+) -> None:
+    """Record GloBird's figures for a day. They override the controller's estimate."""
+    from datetime import date as date_type
+    from datetime import datetime
+
+    from .ledger import Ledger
+    from .models import BillRecord
+
+    try:
+        date_type.fromisoformat(date)
+    except ValueError as exc:
+        raise typer.BadParameter(f"{date!r} is not YYYY-MM-DD") from exc
+    cfg = _load(config, "WARNING")
+    record = BillRecord(date=date, credit_paid=paid, total_cost_aud=total, usage_aud=usage,
+                        solar_aud=solar, super_export_topup_aud=topup,
+                        recorded_at=datetime.now(cfg.site.tz))
+    Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path).record_bill(record)
+    console.print(f"recorded {date}: credit {'[green]paid[/]' if paid else '[red]not paid[/]'}"
+                  + (f", day ${total:.2f}" if total is not None else ""))
 
 
 @app.command()

@@ -271,3 +271,63 @@ def test_ledger_summary_counts_check_bill_days_apart_from_misses(tmp_path):
     assert "secured 1, check bill 1, unverified 0, missed 1" in out
     assert "$1.00 lost on missed days" in out
     assert "0.08*" in out, "a check-bill day is shown as if paid, and flagged"
+
+
+def test_the_first_reading_in_the_window_stands_for_the_gap_since_18():
+    """The 18:00 poll returns a 17:59:50 snapshot, which is ignored; the next one is
+    measured about 18:04:50. Those five minutes are watched, and the inverter was
+    already doing what that reading shows."""
+    m = CreditMonitor(START, END)
+    m.observe(START - timedelta(seconds=10), 0.03, forced=False)       # 17:59:50
+    for k in range(0, 36):
+        m.observe(START + timedelta(minutes=4, seconds=50) + timedelta(minutes=5 * k), -7.8, forced=True)
+    assert m.buckets[START].observed_minutes == pytest.approx(60.0)
+    assert m.buckets[START].imported_kwh == pytest.approx(0.0)
+
+
+def test_without_a_pre_window_reading_the_gap_stays_unwatched():
+    """A mid-window restart has no reading at 18:00 to vouch for the gap."""
+    m = CreditMonitor(START, END)
+    m.observe(START + timedelta(minutes=17), -1.0)
+    assert m.buckets[START].observed_minutes == pytest.approx(0.0)
+
+
+def test_a_recorded_bill_overrides_the_estimate(tmp_path):
+    """1 Oct: written before 1.4.1, the row falls back to the 3x rule and reads NO;
+    GloBird paid the credit. The bill is the final word."""
+    from typer.testing import CliRunner
+
+    from zerohero_dynamic_control.cli import app
+    from zerohero_dynamic_control.ledger import Ledger, verdict_of
+
+    ledger = Ledger(tmp_path / "ledger.jsonl", tmp_path / "decisions.jsonl")
+    for day, wh in (("2026-10-01", [112.0, 43.0, 57.0]), ("2026-10-02", [0.5, 20.0, 10.0])):
+        ledger._append(ledger.outcome_path, _outcome(wh).model_copy(
+            update={"date": day, "exported_kwh": 2.11, "estimated_revenue_aud": 0.39}).model_dump(mode="json"))
+    assert verdict_of(ledger.read_outcomes()[0]) == "MISSED"
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"logging:\n  ledger_path: {tmp_path / 'ledger.jsonl'}\n"
+                   f"  decision_log_path: {tmp_path / 'decisions.jsonl'}\n  samples_path: null\n")
+    run = CliRunner()
+    run.invoke(app, ["bill", "2026-10-01", "--not-paid", "-c", str(cfg)])           # a slip...
+    run.invoke(app, ["bill", "2026-10-01", "--paid", "--total", "0.15", "--topup", "-0.45", "-c", str(cfg)])
+    run.invoke(app, ["bill", "2026-10-02", "--paid", "--total", "0.49", "--topup", "-0.24", "-c", str(cfg)])
+    bills = ledger.read_bills()
+    assert bills["2026-10-01"].credit_paid, "a later entry corrects an earlier one"
+    assert verdict_of(ledger.read_outcomes()[0], bills["2026-10-01"]) == "SECURED"
+    assert len(ledger.read_outcomes()) == 2, "bill rows are not daily outcomes"
+    out = run.invoke(app, ["ledger", "-c", str(cfg)], env={"COLUMNS": "150"}).output
+    assert "secured 2, check bill 0, unverified 0, missed 0" in out
+    assert "5.62 b" in out and "3.00 b" in out, "sold kWh from the Super Export top-up at $0.08"
+    assert "0.49 b" in out and "2 of 2 days from GloBird's bill" in out
+
+
+def test_bill_rejects_a_bad_date(tmp_path):
+    from typer.testing import CliRunner
+
+    from zerohero_dynamic_control.cli import app
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"logging:\n  ledger_path: {tmp_path / 'l.jsonl'}\n  samples_path: null\n")
+    result = CliRunner().invoke(app, ["bill", "01-10-2026", "--paid", "-c", str(cfg)])
+    assert result.exit_code != 0 and not (tmp_path / "l.jsonl").exists()

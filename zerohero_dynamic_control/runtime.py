@@ -203,11 +203,18 @@ class EveningRunner:
         if self.monitor:
             self.monitor.observe(when, grid_kw, forced=forced)
         if self.decision is not None and when < self.decision.window_start:
+            self._saw_pre_window = True
             return
         prev = getattr(self, "_last_export_sample", None)
         if prev is not None and when <= prev[0]:
             return
         export_kw = max(0.0, -grid_kw)
+        if prev is None and getattr(self, "_saw_pre_window", False) and self.decision is not None:
+            # First reading inside the window: it stands for the gap since 18:00,
+            # as in CreditMonitor.observe.
+            gap_h = (when - self.decision.window_start).total_seconds() / 3600.0
+            if 0 < gap_h <= 0.25:
+                self.exported_kwh += export_kw * gap_h
         if grid_kw < 0:
             # Accumulate exported energy between samples.
             prev = getattr(self, "_last_export_sample", None)

@@ -209,6 +209,8 @@ zerohero plan       # build tonight's decision, command nothing
 zerohero run        # scheduler daemon: 17:50 decision + 11:00 free charge
 zerohero serve      # the above plus the HTTP API
 zerohero ledger     # recent daily outcomes and credits secured
+zerohero bill 2026-10-02 --paid --total 0.49 --topup -0.24
+                    # record GloBird's figures; they override the estimates
 ```
 
 API (`pip install -e '.[api]'`):

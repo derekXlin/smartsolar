@@ -329,6 +329,25 @@ class DailyOutcome(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class BillRecord(BaseModel):
+    """GloBird's own figures for one day: the final word on the credit.
+
+    The controller can only estimate import from five-minute cloud readings; the
+    meter decides. Recording the bill lets the ledger report what actually
+    happened, and builds the record the estimates are calibrated against.
+    """
+
+    date: str
+    credit_paid: bool
+    total_cost_aud: float | None = None
+    usage_aud: float | None = None
+    solar_aud: float | None = None
+    """Feed-in, as the bill shows it (negative = credit)."""
+    super_export_topup_aud: float | None = None
+    """Super Export top-up, as the bill shows it (negative = credit)."""
+    recorded_at: datetime | None = None
+
+
 class FreeWindowOutcome(BaseModel):
     """Verdict on one 11:00-14:00 free charging window.
 

@@ -14,7 +14,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from .models import DailyOutcome, Decision, FreeWindowOutcome, Telemetry
+from .models import BillRecord, DailyOutcome, Decision, FreeWindowOutcome, Telemetry
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +102,23 @@ class Ledger:
             outcome.estimated_revenue_aud,
         )
 
+    def record_bill(self, bill: BillRecord) -> None:
+        self._append(self.outcome_path, {"kind": "bill", **bill.model_dump(mode="json")})
+        log.info("bill %s: credit %s", bill.date, "PAID" if bill.credit_paid else "NOT paid")
+
+    def read_bills(self) -> dict[str, BillRecord]:
+        """Latest recorded bill per date: a correction replaces the earlier entry."""
+        out: dict[str, BillRecord] = {}
+        for raw in self._read_rows():
+            if raw.get("kind") == "bill":
+                try:
+                    bill = BillRecord.model_validate(raw)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("skipping malformed bill row: %s", exc)
+                    continue
+                out[bill.date] = bill
+        return out
+
     def record_free_window(self, outcome: FreeWindowOutcome) -> None:
         self._append(self.outcome_path, {"kind": "free_window", **outcome.model_dump(mode="json")})
 
@@ -135,7 +152,7 @@ class Ledger:
             return []
         by_date: dict[str, DailyOutcome] = {}
         for raw in self._read_rows():
-            if raw.get("kind") == "free_window":
+            if raw.get("kind"):            # free_window, bill: not daily outcomes
                 continue
             try:
                 row = DailyOutcome.model_validate(raw)
@@ -148,8 +165,9 @@ class Ledger:
         return rows[-limit:] if limit else rows
 
 
-def verdict_of(outcome: DailyOutcome) -> str:
-    """The controller's own verdict. GloBird's bill is the final word.
+def verdict_of(outcome: DailyOutcome, bill: BillRecord | None = None) -> str:
+    """The controller's own verdict, unless GloBird's bill for the day is recorded:
+    then the bill's (SECURED or MISSED), whatever the estimate said.
 
     SECURED     every hour watched and estimated under the limit
     MISSED      an hour so far over that estimation error cannot explain it
@@ -157,6 +175,8 @@ def verdict_of(outcome: DailyOutcome) -> str:
                 five-minute cloud readings (28 Sep: estimated 61 Wh, credit paid)
     UNVERIFIED  no hour over, but not every hour was watched
     """
+    if bill is not None:
+        return "SECURED" if bill.credit_paid else "MISSED"
     if outcome.credit_secured and outcome.credit_verified:
         return "SECURED"
     if any(h.clearly_breached for h in outcome.hourly_import):

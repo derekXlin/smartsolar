@@ -35,6 +35,7 @@ class CreditMonitor:
         self.limit = limit_kwh_per_hour
         self.buckets: dict[datetime, HourImport] = {}
         self._last_sample: tuple[datetime, float, bool] | None = None
+        self._pre_window_seen = False
 
         h = window_start.replace(minute=0, second=0, microsecond=0)
         while h < window_end:
@@ -69,8 +70,20 @@ class CreditMonitor:
         HourImport.clearly_breached for why the mode decides.
         """
         if when < self.window_start:
+            self._pre_window_seen = True
             return
         import_kw = max(0.0, grid_kw)
+        if self._last_sample is None and self._pre_window_seen:
+            # The loop was running when the window opened: its first poll returned a
+            # snapshot from just before 18:00, ignored above. The next one arrives
+            # about five minutes in, and the pre-armed group switched the inverter
+            # at 18:00 exactly, so that reading stands for the gap since 18:00.
+            # Without this the first ~5 minutes went unwatched, and their export
+            # uncounted (0.6-0.9 kWh a night short of GloBird's figure).
+            gap = when - self.window_start
+            if timedelta(0) < gap <= MAX_SAMPLE_GAP:
+                energy = import_kw * gap.total_seconds() / 3600.0
+                self._add(self.window_start, when, energy, energy if forced else 0.0)
         if self._last_sample is not None:
             prev_t, prev_kw, prev_forced = self._last_sample
             if when <= prev_t:
