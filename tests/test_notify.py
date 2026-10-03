@@ -58,8 +58,8 @@ def test_morning_message_leads_with_the_bill():
         month_bills=[BILL], topup_rate=0.08, health=["Controller 1.7.0 (abc123)"])
     assert title == "ZeroHero Fri 02 Oct: credit paid, day $0.49" and tags == ["white_check_mark"]
     assert "sold 3.0 kWh" in body
-    assert "battery 89% at 17:50; force-discharge 18:00-18:20" in body
-    assert "lowest 29% at 06:59, bought 0.29 kWh before 07:30" in body
+    assert "• Evening: battery 89% at 17:50\n    ◦ force-discharge 18:00-18:20 exporting 2.6 kWh\n    ◦ then self-use" in body
+    assert "• Overnight: lowest 29% at 06:59\n    ◦ bought 0.29 kWh before 07:30" in body
     assert "October so far: credit 1/1 days, total $0.49" in body
 
 
@@ -142,3 +142,21 @@ async def test_a_restart_does_not_resend(tmp_path, monkeypatch):
     again = _scheduler(tmp_path, monkeypatch, datetime(2026, 10, 3, 11, 0, tzinfo=TZ))
     await again.morning_summary_job(final=True)
     assert len(s.notifier.sent) == 1 and again.notifier.sent == []
+
+
+def test_every_line_is_a_bullet_or_an_indented_detail():
+    """Readable on a phone: one item per bullet, details indented under it."""
+    from zerohero_dynamic_control.notify import compose_bill_followup
+
+    outcome = DailyOutcome(date="2026-10-02", exported_kwh=2.7, final_soc_pct=67.0, hourly_import=[])
+    bodies = [
+        compose_morning(date(2026, 10, 2), outcome=outcome, bill=BILL, decision=DECISION, free_window=None,
+                        overnight=None, month_bills=[BILL], topup_rate=0.08, health=["Controller x"])[1],
+        compose_morning(date(2026, 10, 2), outcome=None, bill=None, decision=None, free_window=None,
+                        overnight=None, month_bills=[], topup_rate=0.08, health=[])[1],
+        compose_evening({**DECISION, "credit_achievable": False, "telemetry_assumed": True}, catch_up=True)[1],
+        compose_bill_followup(BILL, 0.08)[1],
+    ]
+    for body in bodies:
+        for line in body.splitlines():
+            assert line.startswith(("• ", "    ◦ ")), repr(line)

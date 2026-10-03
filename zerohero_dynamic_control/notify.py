@@ -100,6 +100,34 @@ def control_line(decision: dict[str, Any] | None) -> str | None:
     return None
 
 
+BULLET = "• "
+SUB = "    ◦ "
+
+
+def bulleted(items: list[tuple[str, list[str]]]) -> str:
+    """One bullet per item, its details indented beneath. Plain text, not Markdown:
+    the ntfy iPhone app shows Markdown as raw symbols."""
+    lines = []
+    for head, details in items:
+        lines.append(BULLET + head)
+        lines.extend(SUB + d for d in details)
+    return "\n".join(lines)
+
+
+def _plan_item(plan: str | None) -> tuple[str, list[str]]:
+    """'force-discharge 18:00-18:20 exporting 2.6 kWh, self-use for the rest of the window'
+    -> ('Plan: force-discharge 18:00-18:20 exporting 2.6 kWh', ['then self-use'])."""
+    if not plan:
+        return "Plan: ?", []
+    head, sep, rest = plan.partition(", ")
+    if not sep:
+        head, sep, rest = plan.partition(" — ")
+    details = []
+    if rest:
+        details.append("then self-use" if rest.startswith("self-use for the rest") else rest)
+    return f"Plan: {head}", details
+
+
 def compose_morning(
     day: date,
     *,
@@ -127,69 +155,62 @@ def compose_morning(
         title = f"ZeroHero {d}: no evening record"
         tags = ["warning"]
 
-    lines: list[str] = []
+    items: list[tuple[str, list[str]]] = []
     if bill is not None:
-        sold = ""
+        details = [f"usage {_money(bill.usage_aud)}, feed-in {_money(bill.solar_aud)}, "
+                   f"top-up {_money(bill.super_export_topup_aud)}"]
         if bill.super_export_topup_aud is not None and topup_rate > 0:
-            sold = f", sold {-bill.super_export_topup_aud / topup_rate:.1f} kWh"
-        lines.append(
-            f"GloBird: credit {'paid' if bill.credit_paid else 'NOT paid'}, day {_money(bill.total_cost_aud)} "
-            f"(usage {_money(bill.usage_aud)}, feed-in {_money(bill.solar_aud)}, "
-            f"top-up {_money(bill.super_export_topup_aud)}{sold})"
-        )
+            details.append(f"sold {-bill.super_export_topup_aud / topup_rate:.1f} kWh")
+        items.append((f"GloBird: credit {'paid' if bill.credit_paid else 'NOT paid'}, "
+                       f"day {_money(bill.total_cost_aud)}", details))
     else:
-        lines.append("GloBird: not published yet")
+        items.append(("GloBird: not published yet", []))
 
     if decision is not None:
-        plan = control_line(decision) or "?"
-        lines.append(f"Evening: battery {decision.get('starting_soc_pct', 0):.0f}% at 17:50; {plan}")
+        plan_head, plan_details = _plan_item(control_line(decision))
+        items.append((f"Evening: battery {decision.get('starting_soc_pct', 0):.0f}% at 17:50",
+                       [plan_head[len("Plan: "):], *plan_details]))
     if outcome is not None:
         hours = " / ".join(f"{h.imported_kwh * 1000:.0f}" for h in outcome.hourly_import) or "?"
-        lines.append(
-            f"Result: sold ~{outcome.exported_kwh:.1f} kWh (estimate), battery {outcome.final_soc_pct:.0f}% at 21:00, "
-            f"import {hours} Wh per hour (estimate; limit 30)"
-        )
+        items.append((f"Result: sold ~{outcome.exported_kwh:.1f} kWh, battery {outcome.final_soc_pct:.0f}% at 21:00",
+                      [f"grid import {hours} Wh per hour (limit 30)", "controller estimates"]))
     if overnight:
-        lines.append(
-            f"Overnight: lowest {overnight['low_soc']:.0f}% at {overnight['low_at']}, "
-            f"bought {overnight['import_kwh']:.2f} kWh before {overnight['until']}"
-        )
+        items.append((f"Overnight: lowest {overnight['low_soc']:.0f}% at {overnight['low_at']}",
+                      [f"bought {overnight['import_kwh']:.2f} kWh before {overnight['until']}"]))
     if free_window is not None:
-        lines.append(
-            f"Free charge: {free_window.start_soc_pct:.0f}% -> {free_window.final_soc_pct:.0f}% "
-            f"(+{free_window.energy_added_kwh:.1f} kWh){'' if free_window.ok else ' - CHECK'}"
-        )
+        items.append((f"Free charge: {free_window.start_soc_pct:.0f}% → {free_window.final_soc_pct:.0f}% "
+                      f"(+{free_window.energy_added_kwh:.1f} kWh)", [] if free_window.ok else ["CHECK the schedule"]))
     if month_bills:
         paid = sum(b.credit_paid for b in month_bills)
         total = sum(b.total_cost_aud or 0.0 for b in month_bills)
-        lines.append(f"{day:%B} so far: credit {paid}/{len(month_bills)} days, total {_money(total)}")
-    lines.extend(health)
-    return title, "\n".join(lines), tags
+        items.append((f"{day:%B} so far: credit {paid}/{len(month_bills)} days, total {_money(total)}", []))
+    items.extend((h, []) for h in health)
+    return title, bulleted(items), tags
 
 
 def compose_evening(decision: dict[str, Any], *, catch_up: bool) -> tuple[str, str, list[str]]:
-    plan = control_line(decision) or "?"
     sell = decision.get("opportunistic_export_kwh") or 0.0
     title = f"Tonight: sell {sell:.1f} kWh" if sell >= 0.05 else "Tonight: self-use, nothing to sell"
-    lines = [
-        f"Battery {decision.get('starting_soc_pct', 0):.0f}% at {str(decision.get('made_at', ''))[11:16]}"
-        + (" (decided after a restart)" if catch_up else ""),
-        f"Plan: {plan}",
-        f"Expect ~{decision.get('expected_final_soc', 0):.0f}% at 21:00",
+    items: list[tuple[str, list[str]]] = [
+        (f"Battery {decision.get('starting_soc_pct', 0):.0f}% at {str(decision.get('made_at', ''))[11:16]}",
+         ["decided after a restart"] if catch_up else []),
+        _plan_item(control_line(decision)),
+        (f"Expect ~{decision.get('expected_final_soc', 0):.0f}% at 21:00", []),
     ]
     for line in decision.get("rationale") or []:
-        if line.startswith("load learned"):
-            lines.append(line[0].upper() + line[1:])
+        if line.startswith("load learned from"):
+            head, _, hours = line.partition(": ")
+            items.append((head.replace("load learned from", "Load forecast from"), [hours]))
     tags = ["battery"]
     if not decision.get("credit_achievable", True):
-        lines.append("WARNING: the credit is not winnable tonight; self-use to protect the battery")
+        items.append(("WARNING: the credit is not winnable tonight", ["self-use, to protect the battery"]))
         tags = ["warning"]
     if decision.get("telemetry_assumed"):
-        lines.append("WARNING: no battery reading at decision time; the plan is a guess")
+        items.append(("WARNING: no battery reading at decision time", ["the plan is a guess"]))
         tags = ["warning"]
     elif decision.get("degraded"):
-        lines.append("Note: forecast unavailable, fallback curves used")
-    return title, "\n".join(lines), tags
+        items.append(("Note: forecast unavailable", ["fallback curves used"]))
+    return title, bulleted(items), tags
 
 
 # ------------------------------------------------------------- overnight stats
@@ -247,10 +268,9 @@ async def morning_message(cfg: Any, ledger: Any, day: date, now: datetime, *,
 
 def compose_bill_followup(bill: BillRecord, topup_rate: float) -> tuple[str, str, list[str]]:
     d = date.fromisoformat(bill.date).strftime("%a %d %b")
-    sold = ""
-    if bill.super_export_topup_aud is not None and topup_rate > 0:
-        sold = f", sold {-bill.super_export_topup_aud / topup_rate:.1f} kWh"
     title = f"GloBird {d}: credit {'paid' if bill.credit_paid else 'NOT paid'}, day {_money(bill.total_cost_aud)}"
-    body = (f"usage {_money(bill.usage_aud)}, feed-in {_money(bill.solar_aud)}, "
-            f"top-up {_money(bill.super_export_topup_aud)}{sold}")
-    return title, body, ["white_check_mark"] if bill.credit_paid else ["x"]
+    items = [(f"usage {_money(bill.usage_aud)}, feed-in {_money(bill.solar_aud)}, "
+              f"top-up {_money(bill.super_export_topup_aud)}", [])]
+    if bill.super_export_topup_aud is not None and topup_rate > 0:
+        items.append((f"sold {-bill.super_export_topup_aud / topup_rate:.1f} kWh", []))
+    return title, bulleted(items), ["white_check_mark"] if bill.credit_paid else ["x"]
