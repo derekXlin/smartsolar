@@ -8,8 +8,13 @@ from datetime import date, datetime
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+# The portal login needs the optional `globird` extra. Without it, skip these tests
+# rather than fail collection of the whole suite (which is what CI hit on 3 Oct).
+pytest.importorskip("cryptography")
+
+from cryptography.hazmat.primitives import hashes  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import padding, rsa  # noqa: E402
 
 from zerohero_dynamic_control.globird import (
     GloBirdAuthError,
