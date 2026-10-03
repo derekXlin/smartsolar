@@ -297,6 +297,18 @@ controller:
   #     force_charge: "Forced Charge"
   #     hold: "Stop"
 
+# GloBird's own daily figures, read from the customer portal and recorded in the
+# ledger like `zerohero bill`: whether the ZEROHERO credit was paid, the day's
+# cost, usage, feed-in and Super Export top-up. Read-only. The login comes from
+# GLOBIRD_EMAIL / GLOBIRD_PASSWORD in .env, never from this file. Check it first:
+#     zerohero globird-fetch --dry-run
+globird:
+  enabled: false
+  # The portal publishes a day some time the next day; each fetch records only
+  # new or revised days, looking `days` back.
+  fetch_times: ["07:30", "10:30", "13:30", "16:30"]
+  days: 7
+
 logging:
   level: INFO
   ledger_path: var/ledger.jsonl

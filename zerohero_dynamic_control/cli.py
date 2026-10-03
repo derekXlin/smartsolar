@@ -261,11 +261,65 @@ def bill(
         raise typer.BadParameter(f"{date!r} is not YYYY-MM-DD") from exc
     cfg = _load(config, "WARNING")
     record = BillRecord(date=date, credit_paid=paid, total_cost_aud=total, usage_aud=usage,
-                        solar_aud=solar, super_export_topup_aud=topup,
+                        solar_aud=solar, super_export_topup_aud=topup, source="manual",
                         recorded_at=datetime.now(cfg.site.tz))
     Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path).record_bill(record)
     console.print(f"recorded {date}: credit {'[green]paid[/]' if paid else '[red]not paid[/]'}"
                   + (f", day ${total:.2f}" if total is not None else ""))
+
+
+@app.command("globird-fetch")
+def globird_fetch(
+    config: Path | None = ConfigOpt,
+    days: int = typer.Option(7, help="How many days back to read"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what the portal says; record nothing"),
+) -> None:
+    """Read GloBird's daily costs from the customer portal and record new ones.
+
+    Needs GLOBIRD_EMAIL and GLOBIRD_PASSWORD in the environment. Read-only.
+    """
+    from datetime import datetime
+
+    from .globird import GloBirdError, GloBirdPortal, credentials_from_env, new_or_changed
+    from .ledger import Ledger
+
+    cfg = _load(config, "WARNING")
+    creds = credentials_from_env()
+    if creds is None:
+        console.print("[red]GLOBIRD_EMAIL and GLOBIRD_PASSWORD are not set.[/] Put them in the .env "
+                      "beside your compose file and restart the container.")
+        raise typer.Exit(1)
+    book = Ledger(cfg.logging.ledger_path, cfg.logging.decision_log_path)
+    now = datetime.now(cfg.site.tz)
+    portal = GloBirdPortal(*creds, session_path=cfg.logging.ledger_path.parent / "globird_session.json")
+
+    async def _run():
+        try:
+            return await portal.fetch_bills(days=days, today=now.date())
+        finally:
+            await portal.aclose()
+
+    try:
+        fetched = asyncio.run(_run())
+    except GloBirdError as exc:
+        console.print(f"[bold red]GloBird:[/] {exc}")
+        raise typer.Exit(1) from exc
+    fresh = new_or_changed(fetched, book.read_bills())
+    t = Table(title="GloBird portal", header_style="bold")
+    for col in ("date", "credit", "day $", "usage", "solar", "top-up", ""):
+        t.add_column(col, justify="right" if col != "date" else "left")
+    money = lambda v: "-" if v is None else f"{v:.2f}"  # noqa: E731
+    for b in fetched:
+        t.add_row(b.date, "[green]paid[/]" if b.credit_paid else "[red]not paid[/]", money(b.total_cost_aud),
+                  money(b.usage_aud), money(b.solar_aud), money(b.super_export_topup_aud),
+                  "[cyan]new[/]" if b in fresh else "")
+    console.print(t)
+    if dry_run:
+        console.print(f"dry run: {len(fresh)} day(s) would be recorded")
+        return
+    for b in fresh:
+        book.record_bill(b.model_copy(update={"recorded_at": now}))
+    console.print(f"recorded {len(fresh)} day(s)")
 
 
 @app.command()

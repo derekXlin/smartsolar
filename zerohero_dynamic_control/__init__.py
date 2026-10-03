@@ -9,5 +9,5 @@ from .config import AppConfig
 from .decision_engine import DecisionEngine
 from .models import Decision, Telemetry
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 __all__ = ["AppConfig", "DecisionEngine", "Decision", "Telemetry", "__version__"]

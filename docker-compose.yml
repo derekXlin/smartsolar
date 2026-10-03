@@ -28,6 +28,10 @@ services:
       # passed too or the container exits at startup. Both live in .env, which is
       # gitignored — unlike this file, which is tracked and overwritten on pull.
       FOXESS_SERIAL: ${FOXESS_SERIAL:?set FOXESS_SERIAL in .env (zerohero foxess-discover prints it)}
+      # Optional: GloBird portal login, for fetching the daily costs (globird.enabled).
+      # Empty when unset, so leaving them out of .env changes nothing.
+      GLOBIRD_EMAIL: ${GLOBIRD_EMAIL:-}
+      GLOBIRD_PASSWORD: ${GLOBIRD_PASSWORD:-}
       TZ: Australia/Sydney
       ZEROHERO_API_HOST: 0.0.0.0
 

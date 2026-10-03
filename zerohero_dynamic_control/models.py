@@ -345,6 +345,8 @@ class BillRecord(BaseModel):
     """Feed-in, as the bill shows it (negative = credit)."""
     super_export_topup_aud: float | None = None
     """Super Export top-up, as the bill shows it (negative = credit)."""
+    source: str = "manual"
+    """"manual" (zerohero bill) or "globird-portal" (fetched)."""
     recorded_at: datetime | None = None
 
 

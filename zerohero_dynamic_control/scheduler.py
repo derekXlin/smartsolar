@@ -45,6 +45,7 @@ class ZeroHeroScheduler:
             cfg.logging.ledger_path, cfg.logging.decision_log_path, cfg.logging.samples_path
         )
         self.current_runner: EveningRunner | None = None
+        self.bill_status: dict | None = None
         self.assurance: FreeChargeAssurance | None = None
         self._stop: asyncio.Event | None = None
         self._scheduler = None
@@ -119,6 +120,29 @@ class ZeroHeroScheduler:
         except Exception:
             log.exception("free-window assurance failed")
 
+    async def bill_fetch_job(self) -> None:
+        """Record GloBird's published daily costs. Never touches the inverter."""
+        from .globird import GloBirdError, fetch_and_record
+
+        now = self.clock.now()
+        try:
+            fresh = await fetch_and_record(
+                self.ledger, days=self.cfg.globird.days, now=now,
+                session_path=self.cfg.logging.ledger_path.parent / "globird_session.json",
+            )
+        except (GloBirdError, ImportError) as exc:
+            log.error("GloBird bill fetch failed: %s", exc)
+            self.bill_status = {"at": now.isoformat(), "error": str(exc), "recorded": []}
+            return
+        except Exception as exc:  # noqa: BLE001 - a portal change must not take down the daemon
+            log.exception("GloBird bill fetch failed unexpectedly")
+            self.bill_status = {"at": now.isoformat(), "error": repr(exc), "recorded": []}
+            return
+        for bill in fresh:
+            log.info("GloBird %s: credit %s, day $%.2f", bill.date,
+                     "PAID" if bill.credit_paid else "NOT paid", bill.total_cost_aud or 0.0)
+        self.bill_status = {"at": now.isoformat(), "error": None, "recorded": [b.date for b in fresh]}
+
     # ------------------------------------------------------------------- run
     async def start(self) -> None:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -172,6 +196,16 @@ class ZeroHeroScheduler:
             )
             log.info("scheduled free-window assurance at %02d:%02d (audit) through %s",
                      audit_at // 60, audit_at % 60, self.cfg.plan.free_charge_end)
+
+        if self.cfg.globird.enabled:
+            for t in self.cfg.globird.fetch_times:
+                hh, mm = (int(x) for x in t.split(":"))
+                sched.add_job(
+                    self.bill_fetch_job,
+                    CronTrigger(hour=hh, minute=mm, timezone=self.cfg.site.tz),
+                    id=f"globird_{hh:02d}{mm:02d}", max_instances=1, misfire_grace_time=1800,
+                )
+            log.info("scheduled GloBird bill fetches at %s", ", ".join(self.cfg.globird.fetch_times))
 
         self._stop = asyncio.Event()
         sched.start()
@@ -267,6 +301,7 @@ class ZeroHeroScheduler:
                 self.assurance.last_outcome.model_dump(mode="json")
                 if self.assurance and self.assurance.last_outcome else None
             ),
+            "bills": self.bill_status,
             "credit": {
                 # No breach YET. Mid-window the later hours are unwatched by
                 # definition, so the full verdict would always read False here.

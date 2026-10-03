@@ -211,6 +211,10 @@ zerohero serve      # the above plus the HTTP API
 zerohero ledger     # recent daily outcomes and credits secured
 zerohero bill 2026-10-02 --paid --total 0.49 --topup -0.24
                     # record GloBird's figures; they override the estimates
+zerohero globird-fetch --dry-run
+                    # read those figures from the GloBird portal instead
+                    # (GLOBIRD_EMAIL / GLOBIRD_PASSWORD in .env; globird.enabled
+                    #  in config.yaml fetches them daily)
 ```
 
 API (`pip install -e '.[api]'`):

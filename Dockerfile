@@ -25,7 +25,7 @@ WORKDIR /app
 # stays slim and the zone data updates with a normal dependency bump.
 COPY pyproject.toml README.md ./
 COPY zerohero_dynamic_control ./zerohero_dynamic_control
-RUN pip install --no-cache-dir '.[forecast,api]' tzdata
+RUN pip install --no-cache-dir '.[forecast,api,globird]' tzdata
 
 # Stamp the build. Rebuilding into the same tag leaves nothing to tell you which
 # code is actually running — that is how a config/code version skew went unnoticed

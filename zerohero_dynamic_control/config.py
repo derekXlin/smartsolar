@@ -451,6 +451,30 @@ class ControllerConfig(BaseModel):
     within a few hundred writes."""
 
 
+class GloBirdConfig(BaseModel):
+    """Fetch GloBird's own daily costs from the customer portal and record them.
+
+    Credentials come from the environment only (GLOBIRD_EMAIL, GLOBIRD_PASSWORD
+    in the .env beside the compose file), never from this file. Read-only.
+    """
+
+    enabled: bool = False
+    fetch_times: list[str] = Field(default_factory=lambda: ["07:30", "10:30", "13:30", "16:30"])
+    """Local times to look for newly published days. The portal publishes a day's
+    costs some time the next day; each fetch records only what is new or revised."""
+    days: int = Field(7, ge=1, le=60)
+    """How far back each fetch looks, so a late revision is still picked up."""
+
+    @field_validator("fetch_times")
+    @classmethod
+    def _valid_times(cls, v: list[str]) -> list[str]:
+        for t in v:
+            hh, _, mm = t.partition(":")
+            if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
+                raise ValueError(f"globird.fetch_times: {t!r} is not HH:MM")
+        return v
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     ledger_path: Path = Path("var/ledger.jsonl")
@@ -484,6 +508,7 @@ class AppConfig(BaseModel):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     controller: ControllerConfig = Field(default_factory=ControllerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    globird: GloBirdConfig = Field(default_factory=GloBirdConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     simulation: SimulationConfig = Field(default_factory=SimulationConfig)
 

@@ -43,6 +43,9 @@ services:
       # Required whenever config.yaml uses ${FOXESS_SERIAL}.
       # `zerohero foxess-discover` prints your serial.
       - FOXESS_SERIAL=PASTE_YOUR_INVERTER_SERIAL_HERE
+      # Optional: GloBird portal login, for fetching the daily costs (globird.enabled).
+      # - GLOBIRD_EMAIL=you@example.com
+      # - GLOBIRD_PASSWORD=your-portal-password
       - TZ=Australia/Sydney
       - ZEROHERO_API_HOST=0.0.0.0
 
